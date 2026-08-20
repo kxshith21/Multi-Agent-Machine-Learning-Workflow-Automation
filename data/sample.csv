@@ -1,0 +1,16 @@
+age,income,education,employed,label
+25,45000,bachelor,1,0
+34,62000,master,1,1
+28,38000,bachelor,0,0
+45,95000,phd,1,1
+52,78000,master,1,1
+23,31000,highschool,0,0
+61,110000,phd,1,1
+39,54000,bachelor,1,0
+47,88000,master,1,1
+30,42000,bachelor,1,0
+19,22000,highschool,0,0
+55,102000,phd,1,1
+33,59000,master,0,1
+41,71000,bachelor,1,1
+27,36000,highschool,1,0
