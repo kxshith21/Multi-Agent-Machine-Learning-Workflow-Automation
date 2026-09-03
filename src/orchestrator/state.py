@@ -75,3 +75,36 @@ class AgentMLState(TypedDict, total=False):
 
     evaluation_reasoning: str
     """Human-readable explanation of why the best model was picked (Phase 5)."""
+
+    user_instruction: str
+    """Natural-language instruction from the chat bar describing what to predict.
+
+    Optional. When present, Problem Detection resolves it (via LLM grounded in the
+    actual CSV columns) into target_column + task_type. Blank/absent → auto-detect."""
+
+    instruction_parsed: dict
+    """Cached LLM parse of user_instruction: {"target_column": ..., "task_type": ...}.
+
+    Stored so re-runs/resumes don't re-call the LLM for the same instruction."""
+
+    # ------------------------------------------------------------------
+    # Feature Engineering Selection (4th human checkpoint, Phase 10)
+    # ------------------------------------------------------------------
+    feature_suggestions: list[dict]
+    """Plain-language candidate feature ideas detected by the Profiling Agent.
+    Each dict: {"name", "type", "description", "columns"}. Populated by Profiling,
+    never applied by it (detect & suggest only)."""
+
+    selected_features: list[str]
+    """Names of suggested features the user opted in to at the checkpoint.
+    Populated via the human checkpoint. These are created deterministically by
+    Data Preprocessing after the checkpoint resolves."""
+
+    custom_features: list[dict]
+    """User-defined columns, e.g. [{"name": "price_per_sqft", "formula": "price / sqft"}].
+    Formulas are always evaluated with the restricted safe_formula parser (never eval).
+    Populated via the human checkpoint."""
+
+    feature_engineering_log: list[dict]
+    """Log of every engineered column actually created and why (source: suggested
+    vs. custom, plus the formula/recipe). Same logging pattern as preprocessing_log."""

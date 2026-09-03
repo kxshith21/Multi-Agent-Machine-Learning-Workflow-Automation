@@ -11,6 +11,7 @@ import numpy as np
 
 from src.agents.preprocessing_agent import preprocessing_agent
 from src.orchestrator.state import AgentMLState
+from src.utils.safe_formula import FormulaValidationError, validate_formula, evaluate_formula
 
 
 def test_preprocessing_agent_unencodable_free_text(tmp_path):
@@ -128,3 +129,110 @@ def test_preprocessing_agent_mixed(tmp_path):
 
     log = result["preprocessing_log"]
     assert any(e["column"] == "city" and e["operation"] == "onehot_encode" for e in log)
+
+
+# ---------------------------------------------------------------------------
+# Feature Engineering Selection application (Phase 10)
+# ---------------------------------------------------------------------------
+
+def test_preprocessing_applies_selected_and_custom_features(tmp_path):
+    """
+    A checked suggestion AND a user-supplied custom formula are both created and
+    logged into feature_engineering_log (source: suggested / custom).
+    """
+    csv_file = tmp_path / "fe.csv"
+    rng = np.random.default_rng(1)
+    sqft = 1000.0 + rng.random(20) * 500.0
+    price = 200.0 * sqft + rng.normal(0, 5.0, 20)
+    df = pd.DataFrame({"sqft": sqft, "price": price, "target": [0, 1] * 10})
+    df.to_csv(csv_file, index=False)
+
+    state: AgentMLState = {
+        "raw_file_path": str(csv_file),
+        "target_column": "target",
+        "errors": [],
+        "feature_suggestions": [
+            {
+                "name": "price_per_sqft",
+                "type": "ratio",
+                "description": "Ratio suggestion",
+                "columns": ["price", "sqft"],
+            }
+        ],
+        "selected_features": ["price_per_sqft"],
+        "custom_features": [
+            {"name": "luxury_score", "formula": "price / (sqft + 1)"}
+        ],
+    }
+
+    result = preprocessing_agent(state)
+    df_clean = pd.read_csv(result["clean_dataset_path"])
+
+    # Suggested feature created (ratio)
+    assert "price_per_sqft" in df_clean.columns
+    # Custom feature created
+    assert "luxury_score" in df_clean.columns
+
+    fe_log = result.get("feature_engineering_log", [])
+    suggested_entry = [e for e in fe_log if e.get("source") == "suggested" and e.get("column") == "price_per_sqft"]
+    custom_entry = [e for e in fe_log if e.get("source") == "custom" and e.get("column") == "luxury_score"]
+    assert len(suggested_entry) == 1
+    assert suggested_entry[0]["operation"] == "create"
+    assert len(custom_entry) == 1
+    assert custom_entry[0]["operation"] == "create"
+    assert custom_entry[0]["formula"] == "price / (sqft + 1)"
+
+
+def test_custom_formula_malicious_input_is_rejected_and_not_executed(tmp_path):
+    """
+    CRITICAL SAFETY: a malicious custom formula is rejected by the restricted
+    evaluator and NEVER executed. The eval path must raise FormulaValidationError
+    for function calls / imports / attribute access.
+    """
+    csv_file = tmp_path / "mal.csv"
+    df = pd.DataFrame({
+        "price": [100.0, 110.0, 120.0],
+        "sqft": [10.0, 11.0, 12.0],
+        "target": [0, 1, 0],
+    })
+    df.to_csv(csv_file, index=False)
+
+    # 1. The dangerous input is rejected by validate_formula directly.
+    malicious = "__import__('os').system('ls')"
+    with pytest.raises(FormulaValidationError):
+        validate_formula(malicious, {"price", "sqft"})
+
+    # 2. A benign arithmetic formula over real columns is accepted and evaluated.
+    validate_formula("price / sqft", {"price", "sqft"})
+    series = evaluate_formula("price / sqft", {"price", "sqft"}, df)
+    assert abs(series.iloc[0] - 10.0) < 1e-9
+
+    # 3. Feeding the malicious formula through preprocessing must produce a
+    #    recoverable error and NOT create the column, and must NOT execute.
+    state: AgentMLState = {
+        "raw_file_path": str(csv_file),
+        "target_column": "target",
+        "errors": [],
+        "custom_features": [{"name": "evil_col", "formula": malicious}],
+    }
+    result = preprocessing_agent(state)
+    df_clean = pd.read_csv(result["clean_dataset_path"])
+    assert "evil_col" not in df_clean.columns
+
+    fe_log = result.get("feature_engineering_log", [])
+    assert any(e.get("column") == "evil_col" and e.get("operation") == "skip" for e in fe_log)
+    assert any(
+        e.get("error_type") == "custom_formula_rejected"
+        for e in result.get("errors", [])
+    )
+
+    # 4. Additional malicious variants must also be rejected.
+    for variant in [
+        "__import__('os').system('rm -rf /')",
+        "price.__class__",
+        "eval('1')",
+        "open('x')",
+        "price if True else sqft",   # conditional (unsupported node)
+    ]:
+        with pytest.raises(FormulaValidationError):
+            validate_formula(variant, {"price", "sqft"})

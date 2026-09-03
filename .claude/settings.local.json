@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(dir C:\\\\Users\\\\kankshith nukala\\\\Projects\\\\ML_workflow *)",
-      "Bash(dir C:\\\\Users\\\\kankshith nukala\\\\Projects\\\\ML_workflow\\\\src\\\\agents *)",
-      "Bash(python -m pytest tests/ -v)"
-    ]
-  }
-}

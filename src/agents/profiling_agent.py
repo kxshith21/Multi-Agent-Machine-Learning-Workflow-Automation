@@ -16,6 +16,102 @@ from src.orchestrator.state import AgentMLState, ErrorEntry
 
 logger = logging.getLogger(__name__)
 
+# Thresholds for suggestion detection
+_NUMERIC_PAIR_CORR_THRESHOLD = 0.7   # |corr| above this → ratio/product suggestion
+_BINNING_CARDINALITY_THRESHOLD = 10  # categorical unique count above this → binning idea
+_DATETIME_DECOMPOSE_IDEAS = ["year", "month", "day", "weekday"]
+
+
+def detect_feature_suggestions(df: pd.DataFrame, profile: dict) -> list[dict]:
+    """
+    Scan a profiled dataframe for feature-engineering opportunities and return
+    plain-language candidate suggestions. This agent only DETECTS and SUGGESTS —
+    it never applies anything. Returns an empty list (without erroring) when no
+    obvious opportunities exist (no datetime columns and no correlated numeric
+    pairs).
+
+    Each suggestion is a dict:
+        {"name", "type", "description", "columns"}
+
+    Types:
+        datetime_decompose — split a datetime column into year/month/day/weekday
+        ratio / product     — derive a numeric feature from two correlated numerics
+        binning             — group a high-cardinality categorical column
+    """
+    suggestions: list[dict] = []
+    numeric_cols = [c for c in profile.get("numeric_cols", []) if c in df.columns]
+    categorical_cols = [c for c in profile.get("categorical_cols", []) if c in df.columns]
+
+    # 1. Datetime columns → suggest decomposing into year/month/day/weekday
+    for col in df.columns:
+        is_parsed_datetime = pd.api.types.is_datetime64_any_dtype(df[col])
+        if not is_parsed_datetime and pd.api.types.is_object_dtype(df[col]):
+            # Tolerate string/object columns that read like a datetime (common
+            # after a CSV round-trip) so the suggestion is still offered.
+            try:
+                sample = df[col].dropna().head(5)
+                if len(sample) and all(pd.to_datetime(v, errors="coerce") is not pd.NaT
+                                       for v in sample):
+                    is_parsed_datetime = True
+            except Exception:
+                is_parsed_datetime = False
+        if is_parsed_datetime:
+            suggestions.append({
+                "name": f"{col}_decomposed",
+                "type": "datetime_decompose",
+                "description": (
+                    f"'{col}' is a datetime column. Decompose it into "
+                    f"{', '.join(_DATETIME_DECOMPOSE_IDEAS)} to expose "
+                    "time-based patterns the model can learn from."
+                ),
+                "columns": [str(col)],
+            })
+
+    # 2. Pairs of numeric columns → suggest a ratio/product feature where strongly
+    #    correlated. Skip pairs sharing a column to avoid duplicate suggestions.
+    seen_pairs: set[tuple[str, str]] = set()
+    for i, a in enumerate(numeric_cols):
+        for b in numeric_cols[i + 1:]:
+            pair = tuple(sorted([a, b]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            try:
+                corr = df[[a, b]].corr().iloc[0, 1]
+            except Exception:
+                continue
+            if corr is None or pd.isna(corr):
+                continue
+            if abs(corr) >= _NUMERIC_PAIR_CORR_THRESHOLD:
+                op = "ratio"  # denominator/ratio is typically more informative; keep it simple
+                name = f"{a}_per_{b}"
+                suggestions.append({
+                    "name": name,
+                    "type": op,
+                    "description": (
+                        f"'{a}' and '{b}' are strongly correlated (|r| = {abs(corr):.2f}). "
+                        f"Create '{a} / {b}' to capture the relationship as a single feature."
+                    ),
+                    "columns": [a, b],
+                })
+
+    # 3. High-cardinality categorical columns → suggest binning.
+    for col in categorical_cols:
+        nunique = int(df[col].nunique())
+        if nunique >= _BINNING_CARDINALITY_THRESHOLD:
+            suggestions.append({
+                "name": f"{col}_binned",
+                "type": "binning",
+                "description": (
+                    f"'{col}' has high cardinality ({nunique} unique values). "
+                    "Binning it into fewer groups reduces sparsity and is easier "
+                    "to model than one-hot encoding every level."
+                ),
+                "columns": [str(col)],
+            })
+
+    return suggestions
+
 
 def _sanitize_value(val: Any) -> Any:
     """
@@ -164,7 +260,11 @@ def profiling_agent(state: AgentMLState) -> dict[str, Any]:
 
     logger.info(f"Dataset profiling completed successfully. Profile summary: {num_rows} rows, {num_cols} columns.")
 
+    # Detect feature-engineering opportunities (detect & suggest only — never apply).
+    feature_suggestions = detect_feature_suggestions(df, profile)
+
     return {
         "dataset_profile": profile,
+        "feature_suggestions": feature_suggestions,
         "errors": errors_to_report
     }

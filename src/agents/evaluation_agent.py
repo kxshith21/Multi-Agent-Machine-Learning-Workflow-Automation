@@ -222,8 +222,8 @@ def evaluation_agent(state: AgentMLState) -> Dict[str, Any]:
     )
     if overridden:
         final_reasoning = (
-            f"{base_reasoning} The user overrode this pick and selected "
-            f"'{chosen_best_model_id}' instead."
+            f"{base_reasoning} A manual override replaced this pick: the user "
+            f"selected '{chosen_best_model_id}' instead of the automatic choice."
         )
     else:
         final_reasoning = base_reasoning

@@ -134,22 +134,18 @@ def rank_results(
     successful = [r for r in experiment_results if r.get("success") is True]
 
     def _sort_key(r: Dict[str, Any]):
-        # Primary: sort ascending; we want "best" at the top, so we negate
-        # lower_is_better metrics so ascending = best-first.
+        # Python's sorted() is ascending (smallest first). To make the FIRST
+        # element the BEST model we must negate higher-is-better metrics and
+        # keep lower-is-better metrics raw. The ±inf sentinels returned by
+        # metric_value() survive negation, so NaN/missing still sorts last.
         pval = metric_value(r, primary)
-        if primary_dir == "lower_is_better":
-            pval_key = -pval
-        else:
-            pval_key = pval
+        pval_key = pval if primary_dir == "lower_is_better" else -pval
 
         if tiebreaker is None or tiebreaker_dir is None:
             return (pval_key, r.get("model_name") or r.get("model_id") or "")
 
         tval = metric_value(r, tiebreaker)
-        if tiebreaker_dir == "lower_is_better":
-            tval_key = -tval
-        else:
-            tval_key = tval
+        tval_key = tval if tiebreaker_dir == "lower_is_better" else -tval
 
         return (pval_key, tval_key, r.get("model_name") or r.get("model_id") or "")
 

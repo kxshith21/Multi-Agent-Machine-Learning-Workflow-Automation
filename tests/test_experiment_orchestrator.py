@@ -342,8 +342,13 @@ def test_experiment_orchestrator_scope_checkpoint_is_offered(tmp_path):
     }
 
     paused = graph.invoke(initial_state, config)
-    # If profiling/preprocessing didn't interrupt (they shouldn't), the
-    # pause should be the experiment orchestrator's scope checkpoint.
+    # The feature-engineering checkpoint (Phase 10) now fires first (always
+    # offered, right after problem detection). Drive past it by applying none,
+    # then the graph should pause at the experiment orchestrator's scope
+    # checkpoint.
+    while "__interrupt__" in paused and "feature_suggestions" in paused["__interrupt__"][-1].value:
+        paused = graph.invoke(Command(resume={"selected_features": [], "custom_features": []}), config)
+
     assert "__interrupt__" in paused, "Graph did not pause for any checkpoint"
     # The most recent interrupt should be from experiment_orchestrator
     last_interrupt_payload = paused["__interrupt__"][-1].value

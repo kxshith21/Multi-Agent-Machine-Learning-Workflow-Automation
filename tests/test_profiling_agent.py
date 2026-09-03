@@ -5,9 +5,10 @@ Unit tests for Dataset Profiling Agent (src/agents/profiling_agent.py)
 from __future__ import annotations
 
 import os
+import numpy as np
 import pytest
 import pandas as pd
-from src.agents.profiling_agent import profiling_agent
+from src.agents.profiling_agent import profiling_agent, detect_feature_suggestions
 from src.orchestrator.state import AgentMLState
 
 
@@ -142,3 +143,99 @@ def test_profiling_agent_corrupt_csv_hard_fail(tmp_path):
     }
     with pytest.raises(Exception):
         profiling_agent(state_no_file)
+
+
+# ---------------------------------------------------------------------------
+# Feature-engineering suggestion detection (Phase 10)
+# ---------------------------------------------------------------------------
+
+def test_feature_suggestions_clean_dataset(tmp_path):
+    """
+    A clean dataset with a single numeric column (no pairs), no datetime, and
+    only low-cardinality categoricals produces an EMPTY feature_suggestions list
+    without erroring (no-op case).
+    """
+    csv_file = tmp_path / "no_features.csv"
+    data = {
+        "value": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "cat": ["x", "y", "x", "y", "x"],       # low cardinality -> no binning idea
+    }
+    df = pd.DataFrame(data)
+    df.to_csv(csv_file, index=False)
+
+    state: AgentMLState = {"raw_file_path": str(csv_file), "errors": []}
+    result = profiling_agent(state)
+
+    suggestions = result.get("feature_suggestions")
+    assert suggestions == [], f"Expected empty suggestions, got {suggestions}"
+    assert len(result.get("errors", [])) == 0
+
+
+def test_feature_suggestions_datetime_decompose(tmp_path):
+    """
+    A datetime column yields a datetime_decompose suggestion.
+    """
+    csv_file = tmp_path / "dates.csv"
+    data = {
+        "purchase_date": pd.date_range("2023-01-01", periods=6, freq="D"),
+        "price": [100.0, 110.0, 120.0, 130.0, 140.0, 150.0],
+    }
+    df = pd.DataFrame(data)
+    df.to_csv(csv_file, index=False)
+
+    state: AgentMLState = {"raw_file_path": str(csv_file), "errors": []}
+    result = profiling_agent(state)
+
+    suggestions = result.get("feature_suggestions", [])
+    assert any(s["type"] == "datetime_decompose" and "purchase_date" in " ".join(s["columns"]) for s in suggestions)
+
+
+def test_feature_suggestions_correlated_numeric_pair(tmp_path):
+    """
+    Two strongly correlated numeric columns yield a ratio suggestion.
+    """
+    csv_file = tmp_path / "corr.csv"
+    rng = np.random.default_rng(0)
+    sqft = 1000.0 + rng.random(50) * 500.0
+    price = 200.0 * sqft + rng.normal(0, 5.0, 50)   # near-perfect linear relationship
+    df = pd.DataFrame({"sqft": sqft, "price": price})
+    df.to_csv(csv_file, index=False)
+
+    state: AgentMLState = {"raw_file_path": str(csv_file), "errors": []}
+    result = profiling_agent(state)
+
+    suggestions = result.get("feature_suggestions", [])
+    assert any(s["type"] in ("ratio", "product") for s in suggestions), suggestions
+
+
+def test_feature_suggestions_high_cardinality_binning(tmp_path):
+    """
+    A high-cardinality categorical column yields a binning suggestion.
+    """
+    csv_file = tmp_path / "bin.csv"
+    df = pd.DataFrame({
+        "item_code": [f"SKU-{i}" for i in range(30)],
+        "value": list(range(30)),
+    })
+    df.to_csv(csv_file, index=False)
+
+    state: AgentMLState = {"raw_file_path": str(csv_file), "errors": []}
+    result = profiling_agent(state)
+
+    suggestions = result.get("feature_suggestions", [])
+    assert any(s["type"] == "binning" for s in suggestions), suggestions
+
+
+def test_detect_feature_suggestions_no_op():
+    """
+    Direct call to the detector on a no-opportunity frame returns [] and does not raise.
+    """
+    df = pd.DataFrame({
+        "x": [1.0, 2.0, 3.0],
+    })
+    profile = {
+        "numeric_cols": ["x"],
+        "categorical_cols": [],
+    }
+    suggestions = detect_feature_suggestions(df, profile)
+    assert suggestions == []

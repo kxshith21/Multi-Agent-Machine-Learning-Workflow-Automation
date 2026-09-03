@@ -329,9 +329,12 @@ def test_evaluation_agent_override_changes_best_model_id(tmp_path):
         "status": "running",
     }
 
-    # First invoke: should pause at the experiment orchestrator's scope
-    # checkpoint (Phase 4 §6 #2).
+    # First invoke: should pause at the Phase 10 feature-engineering checkpoint
+    # (always offered, right after problem detection).
     paused = graph.invoke(initial_state, config)
+    assert "__interrupt__" in paused
+    # Drive past the feature-engineering checkpoint (apply nothing by default).
+    paused = graph.invoke(Command(resume={"selected_features": [], "custom_features": []}), config)
     assert "__interrupt__" in paused
     # Resume Phase 4's scope checkpoint with full defaults
     after_scope = graph.invoke(Command(resume={"max_experiments": 6, "max_workers": 4}), config)

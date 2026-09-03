@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command, interrupt
 
 from src.agents.profiling_agent import profiling_agent
 from src.agents.preprocessing_agent import preprocessing_agent
@@ -41,6 +42,55 @@ def orchestrator_node(state: AgentMLState) -> dict:
         "current_phase": "orchestrator",
         "errors": state.get("errors") or [],
         "status": "running",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feature Engineering Selection checkpoint node (Phase 10)
+# ---------------------------------------------------------------------------
+
+def feature_engineering_node(state: AgentMLState) -> dict:
+    """
+    4th human checkpoint (ALWAYS offered, like the Experiment Scope checkpoint).
+
+    Sits after Problem Detection and before Data Preprocessing. Reads the
+    feature suggestions detected by the Profiling Agent and offers the user a
+    chance to select which engineered features to apply (and to add custom
+    formulas). Default is to apply none — the user explicitly opts in.
+
+    When invoked directly (outside a compiled graph, e.g. a unit test),
+    LangGraph's interrupt() raises a RuntimeError ("outside of a runnable
+    context"); we fall back to applying nothing, mirroring the Experiment Scope
+    node's pattern.
+    """
+    suggestions = state.get("feature_suggestions") or []
+    default_selected = []  # apply none by default — user opts in explicitly
+
+    try:
+        override = interrupt({
+            "message": (
+                "Feature Engineering Selection. Choose which suggested features "
+                "to create, and/or add custom formulas. Select none to skip. "
+                "Custom formulas only allow + - * / and existing column names."
+            ),
+            "feature_suggestions": suggestions,
+            "default_selected": default_selected,
+        })
+        override = override or {}
+        selected = [s for s in (override.get("selected_features") or []) if isinstance(s, str)]
+        custom = list(override.get("custom_features") or [])
+    except RuntimeError as exc:
+        if "outside of a runnable context" in str(exc):
+            # Direct call (unit test) — apply none.
+            selected = list(default_selected)
+            custom = []
+        else:
+            raise
+
+    return {
+        "selected_features": selected,
+        "custom_features": custom,
+        "current_phase": "feature_engineering",
     }
 
 
@@ -87,8 +137,9 @@ def build_graph() -> StateGraph:
     # Register nodes
     builder.add_node("orchestrator", orchestrator_node)
     builder.add_node("dataset_profiling",      _wrap(profiling_agent,              "dataset_profiling"))
-    builder.add_node("data_preprocessing",     _wrap(preprocessing_agent,          "data_preprocessing"))
     builder.add_node("problem_detection",      _wrap(problem_detection_agent,      "problem_detection"))
+    builder.add_node("feature_engineering",    feature_engineering_node)
+    builder.add_node("data_preprocessing",     _wrap(preprocessing_agent,          "data_preprocessing"))
     builder.add_node("experiment_orchestrator",_wrap(experiment_orchestrator_agent,"experiment_orchestrator"))
     builder.add_node("model_evaluation",       _wrap(evaluation_agent,             "model_evaluation"))
     builder.add_node("report_generation",      _wrap(report_agent,                 "report_generation"))
@@ -96,9 +147,10 @@ def build_graph() -> StateGraph:
     # Wire linear edges
     builder.add_edge(START,                    "orchestrator")
     builder.add_edge("orchestrator",           "dataset_profiling")
-    builder.add_edge("dataset_profiling",      "data_preprocessing")
-    builder.add_edge("data_preprocessing",     "problem_detection")
-    builder.add_edge("problem_detection",      "experiment_orchestrator")
+    builder.add_edge("dataset_profiling",      "problem_detection")
+    builder.add_edge("problem_detection",      "feature_engineering")
+    builder.add_edge("feature_engineering",    "data_preprocessing")
+    builder.add_edge("data_preprocessing",     "experiment_orchestrator")
     builder.add_edge("experiment_orchestrator","model_evaluation")
     builder.add_edge("model_evaluation",       "report_generation")
     builder.add_edge("report_generation",      END)
@@ -138,6 +190,40 @@ def run_pipeline(
     
     # We invoke the graph. If it hits an interrupt(), it returns the state at the interrupt.
     final_state: AgentMLState = graph.invoke(initial_state, config)
+
+    # Auto-accept every human-in-the-loop checkpoint with its default value so
+    # the convenience runner completes end-to-end. (The Streamlit UI drives these
+    # interactively; here we just keep moving.)
+    for _ in range(15):
+        if "__interrupt__" not in final_state:
+            break
+        payload = final_state["__interrupt__"][-1].value
+        if "detected_task_type" in payload:
+            # Phase 3 detection checkpoint — MUST resume with a non-empty payload
+            # (resuming with {} re-triggers the interrupt indefinitely).
+            resume_value = {
+                "target_column": payload.get("detected_target_column"),
+                "task_type": payload.get("detected_task_type"),
+            }
+        elif "default_scope" in payload:
+            scope = payload["default_scope"]
+            resume_value = {
+                "max_experiments": scope.get("max_experiments", 6),
+                "max_workers": scope.get("max_workers", 4),
+                "time_cap_seconds": 0,
+            }
+        elif "default_best_model_id" in payload:
+            resume_value = {"best_model_id": payload["default_best_model_id"]}
+        elif "feature_suggestions" in payload:
+            # Phase 10 feature-engineering checkpoint — always offered. The CLI
+            # auto-runner applies NONE by default (user opts in via the UI).
+            resume_value = {
+                "selected_features": [],
+                "custom_features": [],
+            }
+        else:
+            resume_value = {}
+        final_state = graph.invoke(Command(resume=resume_value), config)
 
     # Check for hard-fail errors
     hard_errors = [e for e in final_state.get("errors", []) if not e.get("recoverable", True)]

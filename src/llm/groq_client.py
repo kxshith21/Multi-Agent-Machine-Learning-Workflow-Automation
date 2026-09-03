@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # Configuration (read once at module load; override via env vars)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+_DEFAULT_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 _DEFAULT_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.2"))
 _MAX_RETRIES = 3
 _BACKOFF_BASE_S = 1.0  # seconds; doubles on each retry

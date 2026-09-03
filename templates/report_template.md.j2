@@ -1,0 +1,207 @@
+{#
+  AgentML — Report Template (Phase 6)
+  File: templates/report_template.md.j2
+
+  Variables injected by report_agent.py:
+    session_id          str
+    generated_at        str  (ISO-8601 timestamp)
+    llm_available       bool (False → template-only report, no narration)
+    raw_file_path       str
+    n_rows / n_cols / n_missing / missing_pct / n_duplicates  int/float
+    column_types        dict  {col_name: dtype_str}
+    profile_summary     str
+    dataset_narration   str
+    preprocessing_steps list[dict]  each: operation, columns, reason
+    clean_dataset_path  str
+    preprocessing_narration str
+    task_type           str
+    target_column       str | None
+    detection_confidence float
+    detection_reasoning str
+    detection_narration str
+    experiment_results  list[dict]
+    n_experiments_run / n_experiments_ok / n_experiments_failed int
+    ranking             list[dict]
+    primary_metric_name str
+    extra_metric_cols   list[str]
+    leaderboard_narration str
+    best_model_id       str
+    best_model_name     str
+    evaluation_reasoning str
+    best_model_params   dict
+    best_model_metrics  dict
+    best_narration      str
+    errors              list[dict]
+#}
+# AgentML Experiment Report
+
+| | |
+|---|---|
+| **Session** | `{{ session_id }}` |
+| **Generated** | {{ generated_at }} |
+| **Task** | {{ task_type | title }} |
+| **Report mode** | {% if llm_available %}Full (structured + LLM narration){% else %}⚠ Template-only (LLM unavailable — see Errors section){% endif %} |
+
+---
+
+## 1. Executive Summary
+
+{% if llm_available and best_narration %}
+{{ best_narration }}
+{% else %}
+This report covers a **{{ task_type }}** task on a dataset of **{{ n_rows }} rows × {{ n_cols }} columns**.
+After preprocessing, {{ n_experiments_run }} model configurations were evaluated;
+**{{ best_model_name }}** achieved the best {{ primary_metric_name }}
+of **{{ best_model_metrics.get(primary_metric_name, 'N/A') | round_metric }}**.
+{% endif %}
+
+---
+
+## 2. Dataset Profile
+
+| Attribute | Value |
+|-----------|-------|
+| **Source file** | `{{ raw_file_path }}` |
+| **Rows** | {{ n_rows }} |
+| **Columns** | {{ n_cols }} |
+| **Missing values** | {{ n_missing }} ({{ missing_pct | round(1) }}%) |
+| **Duplicate rows** | {{ n_duplicates }} |
+
+### Column Types
+
+| Column | Type |
+|--------|------|
+{% for col, dtype in column_types.items() %}| `{{ col }}` | {{ dtype }} |
+{% endfor %}
+
+### Observations
+
+{% if llm_available and dataset_narration %}
+{{ dataset_narration }}
+{% else %}
+{{ profile_summary }}
+{% endif %}
+
+---
+
+## 3. Data Preprocessing
+
+{% if preprocessing_steps %}
+| # | Operation | Columns | Reason |
+|---|-----------|---------|--------|
+{% for step in preprocessing_steps %}| {{ loop.index }} | {{ step.operation }} | {{ step.columns | join(', ') if step.columns is iterable and step.columns is not string else step.columns }} | {{ step.reason }} |
+{% endfor %}
+
+**Clean dataset written to:** `{{ clean_dataset_path }}`
+
+{% if llm_available and preprocessing_narration %}
+### Preprocessing Notes
+
+{{ preprocessing_narration }}
+{% endif %}
+{% else %}
+No preprocessing transformations were logged.
+{% endif %}
+
+---
+
+## 4. Problem Detection
+
+| Field | Value |
+|-------|-------|
+| **Detected task type** | **{{ task_type | upper }}** |
+| **Target column** | {{ target_column if target_column else '*(none — unsupervised)*' }} |
+| **Confidence** | {{ (detection_confidence * 100) | round(1) }}% |
+
+**Rule-based reasoning:** {{ detection_reasoning }}
+
+{% if llm_available and detection_narration %}
+**Narration:** {{ detection_narration }}
+{% endif %}
+
+---
+
+## 5. Experiment Leaderboard
+
+{{ n_experiments_run }} model configurations run — **{{ n_experiments_ok }} succeeded**, {{ n_experiments_failed }} failed.
+
+{% if ranking %}
+### Ranked Results
+
+| Rank | Model | {{ primary_metric_name | upper }} | {% for extra in extra_metric_cols %}{{ extra | upper }} | {% endfor %}Runtime (s) |
+|------|-------|---|{% for _ in extra_metric_cols %}---|{% endfor %}-------------|
+{% for entry in ranking %}| **{{ entry.rank }}**{% if entry.rank == 1 %} 🏆{% endif %} | {{ entry.model_name }} | {{ entry.primary_value | round_metric }} | {% for ecol in extra_metric_cols %}{{ entry.metrics.get(ecol, '—') | round_metric }} | {% endfor %}{{ entry.runtime_seconds | round(2) }} |
+{% endfor %}
+
+{% if llm_available and leaderboard_narration %}
+### Leaderboard Analysis
+
+{{ leaderboard_narration }}
+{% endif %}
+
+### Failed Experiments
+
+{% set failed_exps = experiment_results | selectattr('success', 'equalto', false) | list %}
+{% if failed_exps %}
+| Model | Error Type | Message |
+|-------|-----------|---------|
+{% for f in failed_exps %}| {{ f.model_name }} | {{ f.error_type }} | {{ f.error_message }} |
+{% endfor %}
+{% else %}
+All experiments completed successfully. ✅
+{% endif %}
+
+{% else %}
+No successful experiments to rank.
+{% endif %}
+
+---
+
+## 6. Best Model & Evaluation
+
+{% if best_model_id and best_model_id != 'none' %}
+### Selected: {{ best_model_name }} 🏆
+
+**Model ID:** `{{ best_model_id }}`
+
+**Evaluation reasoning:** {{ evaluation_reasoning }}
+
+{% if best_model_params %}
+#### Hyperparameters
+
+| Parameter | Value |
+|-----------|-------|
+{% for k, v in best_model_params.items() %}| `{{ k }}` | `{{ v }}` |
+{% endfor %}
+{% endif %}
+
+#### Performance Metrics
+
+| Metric | Value |
+|--------|-------|
+{% for k, v in best_model_metrics.items() %}| {{ k }} | {{ v | round_metric }} |
+{% endfor %}
+
+{% else %}
+No best model was selected (all experiments may have failed).
+
+**Evaluation reasoning:** {{ evaluation_reasoning }}
+{% endif %}
+
+---
+
+## 7. Errors & Warnings
+
+{% if errors %}
+| Phase | Type | Message | Recoverable |
+|-------|------|---------|-------------|
+{% for e in errors %}| {{ e.phase }} | {{ e.error_type }} | {{ e.message }} | {{ '✅' if e.recoverable else '❌' }} |
+{% endfor %}
+{% else %}
+No errors or warnings recorded during this run. ✅
+{% endif %}
+
+---
+
+*Generated by **AgentML** — Multi-Agent ML Workflow Automation*
+*Template mode: {% if llm_available %}LLM-narrated{% else %}template-only (Groq unavailable — fallback active){% endif %}*
