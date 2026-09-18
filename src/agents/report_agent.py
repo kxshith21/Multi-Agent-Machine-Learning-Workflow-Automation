@@ -46,7 +46,7 @@ _OUTPUT_DIR = Path("outputs") / "reports"
 
 # Extra metrics to show per task type (besides the primary)
 _EXTRA_COLS: Dict[str, List[str]] = {
-    "classification": ["f1", "precision", "recall"],
+    "classification": ["precision", "recall", "pr_auc", "accuracy"],
     "regression":     ["rmse", "mae"],
     "clustering":     ["n_clusters", "n_noise"],
 }
@@ -163,6 +163,9 @@ def _build_context(state: AgentMLState, llm_available: bool) -> Dict[str, Any]:
     best_model_params = (best_record or {}).get("params") or {}
     best_model_metrics = (best_record or {}).get("metrics") or {}
 
+    # Class balance (detected in Phase 3) — dict {str(label): share}.
+    class_balance: Dict[str, float] = dict(state.get("class_balance") or {})
+
     return {
         "session_id":           state.get("session_id") or "unknown",
         "generated_at":         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -184,6 +187,7 @@ def _build_context(state: AgentMLState, llm_available: bool) -> Dict[str, Any]:
         # detection
         "task_type":            task_type,
         "target_column":        state.get("target_column"),
+        "class_balance":        class_balance,
         "detection_confidence": state.get("detection_confidence") or 0.0,
         "detection_reasoning":  state.get("detection_reasoning") or "",
         "detection_narration":  "",

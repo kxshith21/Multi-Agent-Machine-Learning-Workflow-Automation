@@ -28,11 +28,13 @@ import numpy as np
 import pandas as pd
 from langgraph.types import interrupt
 from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
     precision_score,
     recall_score,
+    average_precision_score,
     silhouette_score,
     mean_squared_error,
     mean_absolute_error,
@@ -79,11 +81,15 @@ def _compute_metrics(
     y_true: Any,
     y_pred: Any,
     X_for_silhouette: Optional[np.ndarray] = None,
+    y_score: Any = None,
+    pos_label: Any = None,
 ) -> Dict[str, float]:
     """
     Compute task-appropriate metrics.
 
-    Classification: accuracy, f1 (weighted), precision, recall.
+    Classification: accuracy (reported only), f1 (macro), precision (macro),
+                    recall (macro), and PR-AUC for binary tasks (higher-better;
+                    NaN when the estimators has no probability scores).
     Regression:     RMSE, MAE, R².
     Clustering:     silhouette (only if ≥2 clusters were formed and X given),
                     n_clusters, n_noise_points.
@@ -91,23 +97,40 @@ def _compute_metrics(
     metrics: Dict[str, float] = {}
     try:
         if task_type == "classification":
-            labels = np.unique(np.concatenate([np.asarray(y_true), np.asarray(y_pred)]))
-            # Some metrics require at least 2 unique labels in y_true
-            average = "weighted" if len(labels) > 2 else "binary"
-            pos_label = labels[0] if len(labels) == 2 else 1
-            metrics["accuracy"] = float(accuracy_score(y_true, y_pred))
+            y_true_arr = np.asarray(y_true)
+            y_pred_arr = np.asarray(y_pred)
+            labels = np.unique(np.concatenate([y_true_arr, y_pred_arr]))
+            # Macro-averaging by default — fair to minority classes. Binary
+            # classification reduces to the binary case (macro == binary).
+            average = "macro" if len(labels) > 2 else "binary"
+            metrics["accuracy"] = float(accuracy_score(y_true_arr, y_pred_arr))
             try:
-                metrics["f1"] = float(f1_score(y_true, y_pred, average=average, zero_division=0))
+                metrics["f1"] = float(f1_score(y_true_arr, y_pred_arr, average=average, zero_division=0))
             except Exception:
                 metrics["f1"] = float("nan")
             try:
-                metrics["precision"] = float(precision_score(y_true, y_pred, average=average, zero_division=0))
+                metrics["precision"] = float(precision_score(y_true_arr, y_pred_arr, average=average, zero_division=0))
             except Exception:
                 metrics["precision"] = float("nan")
             try:
-                metrics["recall"] = float(recall_score(y_true, y_pred, average=average, zero_division=0))
+                metrics["recall"] = float(recall_score(y_true_arr, y_pred_arr, average=average, zero_division=0))
             except Exception:
                 metrics["recall"] = float("nan")
+            # PR-AUC: binary classification only, computed from the positive-class
+            # scores (probabilities / decision values). Reported, not a ranking metric.
+            metrics["pr_auc"] = float("nan")
+            if len(np.unique(y_true_arr)) == 2 and y_score is not None:
+                try:
+                    if pos_label is not None:
+                        metrics["pr_auc"] = float(average_precision_score(
+                            y_true_arr, np.asarray(y_score), pos_label=pos_label
+                        ))
+                    else:
+                        metrics["pr_auc"] = float(average_precision_score(
+                            y_true_arr, np.asarray(y_score)
+                        ))
+                except Exception:
+                    metrics["pr_auc"] = float("nan")
 
         elif task_type == "regression":
             mse = mean_squared_error(y_true, y_pred)
@@ -200,9 +223,41 @@ def _run_single_experiment(
                     X, y, test_size=0.25, random_state=random_state
                 )
 
+            # Imbalanced-data handling: XGBoost gets scale_pos_weight computed
+            # from THIS dataset's training fold (never hardcoded). The positive
+            # class is the minority class; weight = majority_count / minority_count.
+            if task_type == "classification" and isinstance(estimator, XGBClassifier):
+                vc = y_train.value_counts()
+                if vc.nunique() == 2:
+                    majority = int(vc.max())
+                    minority = int(vc.min())
+                    scale_pos_weight = majority / max(minority, 1)
+                    estimator.set_params(scale_pos_weight=float(scale_pos_weight))
+                    record["params"]["scale_pos_weight"] = round(scale_pos_weight, 4)
+
             estimator.fit(X_train, y_train)
             y_pred = estimator.predict(X_test)
-            metrics = _compute_metrics(task_type, y_true=y_test, y_pred=y_pred)
+
+            # Positive-class scores for PR-AUC (binary classification only).
+            y_score = None
+            pos_label = None
+            if task_type == "classification" and y_train.nunique() == 2:
+                if hasattr(estimator, "predict_proba"):
+                    proba = estimator.predict_proba(X_test)
+                    classes = getattr(estimator, "classes_", None)
+                    if classes is not None and len(classes) == 2:
+                        y_score = proba[:, 1]
+                        pos_label = classes[1]
+                elif hasattr(estimator, "decision_function"):
+                    y_score = estimator.decision_function(X_test)
+
+            metrics = _compute_metrics(
+                task_type,
+                y_true=y_test,
+                y_pred=y_pred,
+                y_score=y_score,
+                pos_label=pos_label,
+            )
             record["n_train_samples"] = int(len(X_train))
             record["n_test_samples"] = int(len(X_test))
 

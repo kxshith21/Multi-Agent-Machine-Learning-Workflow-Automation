@@ -48,6 +48,11 @@ class AgentMLState(TypedDict, total=False):
     detection_reasoning: str
     """Human-readable explanation of why task_type was detected."""
 
+    class_balance: dict
+    """Normalized class distribution of the target column for classification
+    tasks, e.g. {"0": 0.95, "1": 0.05} (keys are str(class label)). Present
+    only for classification; used to surface imbalance before training."""
+
     experiment_results: list[dict]
     """Summary of model evaluation results."""
 

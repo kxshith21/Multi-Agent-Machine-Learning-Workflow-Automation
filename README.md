@@ -26,9 +26,9 @@ CSV → Profiling → Problem Detection → Feature Engineering (human checkpoin
 | 1 | Dataset Profiling | Shape, dtypes, missing %, duplicate count, per-column stats; also **detects & suggests** feature-engineering opportunities (datetime decompose, correlated-pair ratios, binning) without applying them. |
 | 2 | Problem Detection | Resolves target column + task type (classification / regression / clustering); pauses for confirmation when ambiguous. Runs **before** preprocessing so the (possibly LLM-resolved) target is excluded from feature scaling. |
 | 3 | Feature Engineering (checkpoint) | Always-offered human checkpoint. User checks which suggested features to create and/or types a custom formula. Custom formulas are evaluated with a **restricted safe parser** (never `eval`). Default: apply none. |
-| 4 | Data Preprocessing | Dedup, imputation (median/mode), one-hot encoding, standard scaling, drops unusable columns, and **deterministically applies** the user-selected + custom features (logged in `feature_engineering_log`). The resolved target column is preserved as-is (never scaled). |
-| 5 | Experiment Orchestrator | Runs the fixed model zoo for the task type concurrently (ThreadPoolExecutor); isolates failures. |
-| 6 | Model Evaluation | Builds a ranked leaderboard, picks the best model, offers a human override. |
+| 4 | Data Preprocessing | Dedup, imputation (median/mode), one-hot encoding, standard scaling, drops unusable columns, and **deterministically applies** the user-selected + custom features (logged in `feature_engineering_log`). The resolved target column is preserved as-is (never scaled). For **clustering** tasks only, a dimensionality-reduction step compresses the feature matrix (default `TruncatedSVD` → `min(50, n_features)` components) before the model zoo runs — supervised tasks keep their raw features. |
+| 5 | Experiment Orchestrator | Runs the fixed model zoo for the task type concurrently (ThreadPoolExecutor); isolates failures. For imbalanced classification it applies **runtime imbalance handling without SMOTE**: `class_weight="balanced"` (Logistic Regression, Random Forest, SVC) and an XGBoost `scale_pos_weight` computed from each dataset's training fold (majority/minority count ratio). |
+| 6 | Model Evaluation | Builds a ranked leaderboard, picks the best model, offers a human override. Classification ranks by **F1 (macro)** with a **precision tiebreaker**; `pr_auc` is reported (binary only) but never a ranking metric. When a minority class is <10% of samples, the reasoning explicitly explains why F1/PR-AUC were prioritized over accuracy. |
 | 7 | Report Generation | Renders a Jinja2 template + optional Groq narration; writes Markdown and a PDF (pure-Python reportlab). |
 
 Human-in-the-loop checkpoints sit at Problem Detection (ambiguous task), a
@@ -159,6 +159,39 @@ human override), and edge cases (empty CSV, single-column, all-missing columns,
 huge-cardinality categoricals, no-numeric datasets, detection-checkpoint resume,
 and the always-offered feature-engineering checkpoint).
 
+## Agent Evaluation & Benchmarks (DeepEval)
+
+AgentML includes an automated LLM evaluation suite powered by **DeepEval** to quantitatively test and continuously monitor agent decision accuracy, hallucination prevention, and response faithfulness.
+
+### Benchmark Evaluation Metrics
+
+| Agent & Workflow Area | DeepEval Metric | Target Criteria | Benchmark Result | Status |
+| :--- | :--- | :--- | :---: | :---: |
+| **Problem Detection Agent** | `GEval` (Decision Accuracy) | Evaluates if the agent accurately maps natural-language instructions to exact dataset columns without hallucinating nonexistent features. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+| **Report Agent Narration** | `HallucinationMetric` | Assesses whether the generated narrative contains fabricated accuracy numbers, ungrounded claims, or fake model names. | **1.00 / 1.00** (0% Hallucination) | **PASSED** |
+| **Report Agent Narration** | `FaithfulnessMetric` | Measures if every factual claim in the narrative strictly derives from the actual pipeline results and leaderboard metrics. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+| **Agent Reasoning / Q&A** | `AnswerRelevancyMetric` | Verifies that the agent answers user architectural & ML queries directly without extraneous rambling. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+
+> Results above were verified on a live run (judge LLM: `openai/gpt-oss-120b`
+> via Groq). All four benchmarks passed at **1.00 / 1.00**, exceeding the
+> `>= 0.80` threshold.
+
+### Running the DeepEval Benchmark Suite
+
+You can run the evaluations either as standard unit tests or via the benchmark runner script:
+
+```bash
+# 1. Run via Pytest
+pytest tests/test_agent_deepeval.py -v
+
+# 2. Run detailed terminal benchmark report
+python scripts/run_deepeval_eval.py
+```
+
+The benchmark runner uses a Groq-hosted judge LLM (`openai/gpt-oss-120b` by
+default; override with `GROQ_EVAL_MODEL` in `.env`) and automatically retries
+transient Groq rate limits so a single run completes end-to-end.
+
 ## Performance
 
 `scripts/perf_check_50k.py` generates a 55,000-row classification CSV and times
@@ -174,6 +207,21 @@ is the dominant cost — ~30 s for 6 models). Nothing chokes or times out.
 - **Fixed model zoos only.** Each task type has a fixed, shallow set of models
   with fixed hyper-parameters — no HPO, no deep learning (by design, see
   `AgentML/Rules.md`).
+- **Imbalanced classification uses built-in weights only (no SMOTE).**
+  `class_weight="balanced"` on scikit-learn classifiers and a per-dataset XGBoost
+  `scale_pos_weight` keep the zoo inside `scikit-learn`/`xgboost` (Rules.md §3).
+  There is no resampling; very extreme imbalance may still produce weak minority
+  recall. Ranking mitigates this by using **F1 (macro)** as the primary metric
+  with **precision** as the tiebreaker (accuracy is computed and reported but
+  never used for ranking).
+- **Dimensionality reduction is clustering-only.** To combat the curse of
+  dimensionality for unsupervised (silhouette-based) evaluation, preprocessing
+  compresses the feature matrix to `min(50, n_features)` components via
+  `TruncatedSVD` when the task is clustering. It is **never** applied to
+  classification/regression (features must stay interpretable). Configure via
+  `PREPROCESS_DIM_REDUCTION` (`svd` | `pca` | `off`) and
+  `PREPROCESS_DIM_REDUCTION_COMPONENTS` (int) in `.env`; a failed reduction is a
+  recoverable, non-blocking fallback to the unreduced matrix.
 - **Preprocessing drops free-text / huge-cardinality columns** (rule-based:
   cardinality > 20 with unique ratio > 0.4) and columns that are 100% missing.
   It does not do text vectorisation. Feature engineering is **user-driven**: the

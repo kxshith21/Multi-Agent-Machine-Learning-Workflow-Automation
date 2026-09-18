@@ -15,6 +15,7 @@ from sklearn.dummy import DummyClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
 from xgboost import XGBClassifier
 
 from src.model_zoo import ModelSpec
@@ -40,7 +41,8 @@ def get_models() -> List[ModelSpec]:
             name="LogisticRegression_default",
             family="linear",
             estimator=LogisticRegression(max_iter=1000, random_state=42),
-            param_grid={},
+            # Imbalanced-data handling: balanced class weights (no SMOTE — scikit-learn/XGBoost only).
+            param_grid={"class_weight": "balanced"},
         ),
         # 3. KNN
         ModelSpec(
@@ -56,7 +58,8 @@ def get_models() -> List[ModelSpec]:
             estimator=RandomForestClassifier(
                 n_estimators=100, max_depth=10, random_state=42, n_jobs=1
             ),
-            param_grid={},
+            # Imbalanced-data handling: balanced class weights.
+            param_grid={"class_weight": "balanced"},
         ),
         # 5. Gradient Boosting (sklearn)
         ModelSpec(
@@ -67,7 +70,16 @@ def get_models() -> List[ModelSpec]:
             ),
             param_grid={},
         ),
-        # 6. XGBoost
+        # 6. SVC
+        ModelSpec(
+            name="SVC_rbf",
+            family="svm",
+            # PR-AUC is computed from decision_function scores (no probability=True,
+            # which is deprecated in sklearn ≥1.9).
+            estimator=SVC(kernel="rbf", random_state=42),
+            param_grid={"class_weight": "balanced"},
+        ),
+        # 7. XGBoost (scale_pos_weight computed at runtime in the orchestrator)
         ModelSpec(
             name="XGBClassifier_n100",
             family="boosting",

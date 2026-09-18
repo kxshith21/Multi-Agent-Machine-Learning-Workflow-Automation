@@ -7,7 +7,9 @@ metrics on every experiment record's `metrics` dict; this module
 centralizes the "which metric matters most" mapping.
 
 Hierarchy per task type:
-  - Classification: primary = accuracy (higher better), tiebreaker = f1 (higher better)
+  - Classification: primary = f1 (macro, higher better), tiebreaker = precision (higher better).
+                    accuracy is still computed/reported but NOT used for ranking
+                    (majority-class baselines game accuracy on imbalanced data).
   - Regression:     primary = r2      (higher better), tiebreaker = rmse (lower better)
   - Clustering:     primary = silhouette (higher better); NaN treated as worst
 
@@ -27,15 +29,17 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------------------
 
 #: Primary metric per task type — what the leaderboard ranks by.
+#: Classification ranks on F1 (macro) rather than accuracy, so that models
+#: which simply predict the majority class on imbalanced data rank correctly.
 PRIMARY_METRIC: Dict[str, str] = {
-    "classification": "accuracy",
+    "classification": "f1",
     "regression": "r2",
     "clustering": "silhouette",
 }
 
 #: Tiebreaker metric per task type (None = no tiebreaker).
 TIEBREAKER_METRIC: Dict[str, Optional[str]] = {
-    "classification": "f1",
+    "classification": "precision",  # macro precision: trade-off companion to F1
     "regression": "rmse",   # NOTE: rmse is lower-is-better; ranking handles this.
     "clustering": "n_clusters",  # secondary signal: more clusters is not strictly better,
                                  # but we use it as a stable tiebreaker for ranking only.
@@ -48,6 +52,7 @@ METRIC_DIRECTION: Dict[str, str] = {
     "f1": "higher_is_better",
     "precision": "higher_is_better",
     "recall": "higher_is_better",
+    "pr_auc": "higher_is_better",
     "r2": "higher_is_better",
     "rmse": "lower_is_better",
     "mae": "lower_is_better",

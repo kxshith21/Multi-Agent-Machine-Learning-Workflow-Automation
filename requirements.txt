@@ -25,6 +25,7 @@ streamlit>=1.35.0
 # Testing
 pytest>=8.0.0
 pytest-cov>=4.0.0
+deepeval>=4.2.0
 
 # NOT ALLOWED (see Rules.md §3):
 # torch, tensorflow, keras — deep learning out of scope

@@ -33,7 +33,18 @@ from src.orchestrator.graph import build_graph
 # Helpers — fabricate experiment_results for unit tests
 # ---------------------------------------------------------------------------
 
-def _class_record(name: str, accuracy: float, f1: float, success: bool = True) -> dict:
+def _class_record(
+    name: str,
+    accuracy: float,
+    f1: float,
+    precision: float | None = None,
+    recall: float | None = None,
+    pr_auc: float | None = None,
+    success: bool = True,
+) -> dict:
+    precision = f1 if precision is None else precision
+    recall = f1 if recall is None else recall
+    pr_auc = f1 if pr_auc is None else pr_auc
     return {
         "model_id": name,
         "model_name": name,
@@ -43,7 +54,13 @@ def _class_record(name: str, accuracy: float, f1: float, success: bool = True) -
         "success": success,
         "error_type": None,
         "error_message": None,
-        "metrics": {"accuracy": accuracy, "f1": f1, "precision": accuracy, "recall": f1},
+        "metrics": {
+            "accuracy": accuracy,
+            "f1": f1,
+            "precision": precision,
+            "recall": recall,
+            "pr_auc": pr_auc,
+        },
         "runtime_seconds": 0.5,
         "n_train_samples": 100,
         "n_test_samples": 50,
@@ -100,6 +117,10 @@ def _clust_record(
 
 def test_metric_direction_defaults_higher_is_better():
     assert direction_for("accuracy") == "higher_is_better"
+    assert direction_for("f1") == "higher_is_better"
+    assert direction_for("precision") == "higher_is_better"
+    assert direction_for("recall") == "higher_is_better"
+    assert direction_for("pr_auc") == "higher_is_better"
     assert direction_for("rmse") == "lower_is_better"
     assert direction_for("mae") == "lower_is_better"
     assert direction_for("r2") == "higher_is_better"
@@ -127,24 +148,28 @@ def test_metric_value_handles_nan_and_missing():
 # 2. Ranking correctness — classification
 # ---------------------------------------------------------------------------
 
-def test_classification_ranking_picks_highest_accuracy():
+def test_classification_ranking_picks_highest_f1():
+    """
+    Classification ranks by F1 (macro), NOT accuracy. A model with high
+    accuracy but low F1 (e.g. majority-class gambler) must not win.
+    """
     results = [
-        _class_record("A_low",  accuracy=0.60, f1=0.55),
+        _class_record("A_low",  accuracy=0.95, f1=0.55),  # high accuracy, low f1
         _class_record("B_high", accuracy=0.92, f1=0.90),
         _class_record("C_mid",  accuracy=0.78, f1=0.70),
     ]
     ranking = rank_results(results, "classification")
     assert [r["model_name"] for r in ranking] == ["B_high", "C_mid", "A_low"]
-    assert ranking[0]["primary_metric"] == "accuracy"
-    assert ranking[0]["primary_value"] == pytest.approx(0.92)
+    assert ranking[0]["primary_metric"] == "f1"
+    assert ranking[0]["primary_value"] == pytest.approx(0.90)
     assert [r["rank"] for r in ranking] == [1, 2, 3]
 
 
-def test_classification_tiebreaker_on_accuracy_uses_f1():
-    """Two models tied on accuracy — higher f1 wins."""
+def test_classification_tiebreaker_on_f1_uses_precision():
+    """Two models tied on F1 — higher macro precision wins."""
     results = [
-        _class_record("AA", accuracy=0.85, f1=0.70),
-        _class_record("BB", accuracy=0.85, f1=0.80),
+        _class_record("AA", accuracy=0.85, f1=0.70, precision=0.65),
+        _class_record("BB", accuracy=0.85, f1=0.70, precision=0.80),
     ]
     ranking = rank_results(results, "classification")
     assert ranking[0]["model_name"] == "BB"
@@ -376,3 +401,139 @@ def test_evaluation_agent_override_changes_best_model_id(tmp_path):
     print(f"--- FINAL evaluation_reasoning ---")
     print(final["evaluation_reasoning"])
     print(f"--- FINAL best_model_id: {final['best_model_id']} ---")
+
+
+# ---------------------------------------------------------------------------
+# 8. Imbalanced-data handling — F1/PR-AUC beat a majority-class baseline
+# ---------------------------------------------------------------------------
+
+def test_imbalanced_classification_not_fooled_by_majority_baseline(tmp_path):
+    """
+    Synthetic 95/5 imbalanced dataset end-to-end.
+
+    A naive majority-class baseline (DummyClassifier) scores HIGH accuracy but
+    LOW F1/PR-AUC. The ranking logic must NOT crown it best when a real model
+    captures the minority class. Also verifies:
+      - class_weight=balanced is applied to LR/RF (and SVC, if in results);
+      - scale_pos_weight is computed at runtime for XGBClassifier;
+      - state["class_balance"] ≈ {0: 0.95, 1: 0.05};
+      - evaluation_reasoning explains F1/PR-AUC were prioritized over accuracy.
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.datasets import make_classification
+
+    X, y = make_classification(
+        n_samples=600,
+        n_features=8,
+        n_informative=6,
+        n_redundant=0,
+        n_classes=2,
+        weights=[0.95, 0.05],   # 95% class 0, 5% class 1
+        flip_y=0.02,
+        random_state=42,
+    )
+    df = pd.DataFrame(X, columns=[f"feat_{i}" for i in range(X.shape[1])])
+    df["target"] = y
+    csv_path = str(tmp_path / "imbalanced.csv")
+    df.to_csv(csv_path, index=False)
+
+    graph = build_graph()
+    session_id = "test_imbalanced_classification"
+    config = {"configurable": {"thread_id": session_id}}
+    initial_state: AgentMLState = {
+        "session_id": session_id,
+        "raw_file_path": csv_path,
+        "target_column": "target",
+        "errors": [],
+        "status": "running",
+    }
+    state = graph.invoke(initial_state, config)
+    for _ in range(6):
+        if "__interrupt__" not in state:
+            break
+        payload = state["__interrupt__"][-1].value
+        if "detected_target_column" in payload:
+            state = graph.invoke(
+                Command(resume={"target_column": "target", "task_type": "classification"}),
+                config,
+            )
+        elif "feature_suggestions" in payload:
+            state = graph.invoke(
+                Command(resume={"selected_features": [], "custom_features": []}),
+                config,
+            )
+        elif "default_scope" in payload:
+            scope = payload["default_scope"]
+            state = graph.invoke(
+                Command(resume={
+                    "max_experiments": scope["max_experiments"],
+                    "max_workers": scope["max_workers"],
+                    "time_cap_seconds": 0,
+                }),
+                config,
+            )
+        elif "default_best_model_id" in payload:
+            state = graph.invoke(
+                Command(resume={"best_model_id": payload["default_best_model_id"]}),
+                config,
+            )
+
+    # --- class balance surfaced before training ---
+    cb = state.get("class_balance") or {}
+    assert cb, "class_balance must be present for a classification task"
+    assert min(cb.values()) < 0.10, f"expected a <10% minority, got {cb}"
+
+    # --- imbalance-aware reasoning ---
+    assert "minority" in state.get("evaluation_reasoning", "").lower()
+
+    # --- ranking uses F1, and the majority-only baseline is NOT best ---
+    ranking = state.get("ranking") or []
+    assert len(ranking) > 1
+    assert ranking[0]["primary_metric"] == "f1"
+    baseline = next(
+        (r for r in ranking if "DummyClassifier" in r["model_name"]), None
+    )
+    assert baseline is not None, "DummyClassifier baseline must be in the zoo"
+    assert baseline["rank"] != 1, (
+        "Majority-class baseline must NOT rank first: "
+        f"{baseline['model_name']}"
+    )
+    # The baseline: high accuracy, low F1 / near-prevailence PR-AUC.
+    base_m = baseline["metrics"]
+    assert base_m["accuracy"] >= 0.85
+    assert base_m["f1"] < 0.6
+    winner = ranking[0]
+    assert winner["metrics"]["f1"] > base_m["f1"]
+
+    # --- imbalance parameters actually applied ---
+    results = state.get("experiment_results") or []
+    for r in results:
+        if r["model_name"] in ("LogisticRegression_default", "RandomForestClassifier_n100", "SVC_rbf"):
+            assert r["params"].get("class_weight") == "balanced"
+        if r["model_name"] == "XGBClassifier_n100" and r["success"]:
+            assert r["params"].get("scale_pos_weight", 0.0) > 1.0, (
+                "scale_pos_weight must be > 1.0 for imbalanced data"
+            )
+
+    # --- every successful record carries f1, pr_auc, accuracy ---
+    for r in results:
+        if r["success"]:
+            for key in ("f1", "pr_auc", "accuracy", "precision", "recall"):
+                assert key in r["metrics"], f"{r['model_name']} missing {key}"
+
+    # --- print the actual leaderboard for the record ---
+    print("\n=== IMBALANCED (95/5) LEADERBOARD — ranked by F1 ===")
+    print(f"{'Rank':<5}{'Model':<32}{'ACC':>8}{'F1':>8}{'PR-AUC':>8}{'PREC':>8}{'REC':>8}")
+    for r in ranking:
+        m = r["metrics"]
+        print(
+            f"{r['rank']:<5}{r['model_name']:<32}"
+            f"{m.get('accuracy', float('nan')):>8.3f}"
+            f"{m.get('f1', float('nan')):>8.3f}"
+            f"{m.get('pr_auc', float('nan')):>8.3f}"
+            f"{m.get('precision', float('nan')):>8.3f}"
+            f"{m.get('recall', float('nan')):>8.3f}"
+        )
+    print(f"\nclass_balance = {cb}")
+    print(f"evaluation_reasoning = {state.get('evaluation_reasoning')}")

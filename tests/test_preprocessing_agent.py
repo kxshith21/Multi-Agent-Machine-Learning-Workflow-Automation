@@ -132,8 +132,166 @@ def test_preprocessing_agent_mixed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Feature Engineering Selection application (Phase 10)
+# Dimensionality Reduction (clustering only — Option 1)
 # ---------------------------------------------------------------------------
+
+def _write_wide_clustering_csv(tmp_path, n_features=80, n_rows=60):
+    """Wide numeric dataset for clustering (no target column present)."""
+    csv_file = tmp_path / "wide_clustering.csv"
+    rng = np.random.default_rng(7)
+    data = {
+        f"feat_{i}": rng.normal(0, 1, size=n_rows) + (2.0 * i / n_features)
+        for i in range(n_features)
+    }
+    pd.DataFrame(data).to_csv(csv_file, index=False)
+    return str(csv_file)
+
+
+def test_preprocessing_dim_reduction_applied_for_clustering(tmp_path, monkeypatch):
+    """
+    Clustering task → features are reduced to <= min(50, n_features) components,
+    columns renamed pc_N, and a dimension_reduction entry is logged.
+    """
+    monkeypatch.delenv("PREPROCESS_DIM_REDUCTION_COMPONENTS", raising=False)
+    monkeypatch.delenv("PREPROCESS_DIM_REDUCTION", raising=False)
+
+    state: AgentMLState = {
+        "raw_file_path": _write_wide_clustering_csv(tmp_path),
+        "target_column": None,
+        "task_type": "clustering",
+        "errors": [],
+    }
+
+    result = preprocessing_agent(state)
+    df_clean = pd.read_csv(result["clean_dataset_path"])
+
+    pc_cols = [c for c in df_clean.columns if c.startswith("pc_")]
+    assert len(pc_cols) > 0
+    assert len(pc_cols) <= 50
+    assert len(pc_cols) < 80  # reduced vs original 80 engineered features
+
+    log = result["preprocessing_log"]
+    red = [e for e in log if e["operation"] == "dimension_reduction"]
+    assert len(red) == 1
+    assert "80 features" in red[0]["details"]
+    assert f"→ {len(pc_cols)} components" in red[0]["details"]
+
+
+def test_preprocessing_dim_reduction_uses_env_component_override(tmp_path, monkeypatch):
+    """
+    PREPROCESS_DIM_REDUCTION_COMPONENTS overrides the default component count.
+    """
+    monkeypatch.setenv("PREPROCESS_DIM_REDUCTION_COMPONENTS", "5")
+    monkeypatch.delenv("PREPROCESS_DIM_REDUCTION", raising=False)
+
+    state: AgentMLState = {
+        "raw_file_path": _write_wide_clustering_csv(tmp_path),
+        "target_column": None,
+        "task_type": "clustering",
+        "errors": [],
+    }
+
+    result = preprocessing_agent(state)
+    df_clean = pd.read_csv(result["clean_dataset_path"])
+
+    pc_cols = [c for c in df_clean.columns if c.startswith("pc_")]
+    assert len(pc_cols) == 5
+
+    red = [e for e in result["preprocessing_log"] if e["operation"] == "dimension_reduction"]
+    assert len(red) == 1
+    assert "5 components" in red[0]["details"]
+
+
+def test_preprocessing_dim_reduction_off_env(tmp_path, monkeypatch):
+    """
+    PREPROCESS_DIM_REDUCTION=off disables reduction entirely — raw features kept.
+    """
+    monkeypatch.setenv("PREPROCESS_DIM_REDUCTION", "off")
+
+    state: AgentMLState = {
+        "raw_file_path": _write_wide_clustering_csv(tmp_path),
+        "target_column": None,
+        "task_type": "clustering",
+        "errors": [],
+    }
+
+    result = preprocessing_agent(state)
+    df_clean = pd.read_csv(result["clean_dataset_path"])
+
+    assert not any(c.startswith("pc_") for c in df_clean.columns)
+    assert len(df_clean.columns) == 80
+    assert not any(
+        e["operation"] == "dimension_reduction"
+        for e in result["preprocessing_log"]
+    )
+
+
+def test_preprocessing_dim_reduction_untouched_for_supervised(tmp_path, monkeypatch):
+    """
+    Supervised (classification/regression) tasks are NEVER reduced — raw,
+    interpretable feature columns must be preserved.
+    """
+    monkeypatch.delenv("PREPROCESS_DIM_REDUCTION_COMPONENTS", raising=False)
+    monkeypatch.delenv("PREPROCESS_DIM_REDUCTION", raising=False)
+
+    csv_file = tmp_path / "supervised.csv"
+    rng = np.random.default_rng(3)
+    sqft = rng.uniform(500, 3500, size=30)
+    price = sqft * 250 + rng.normal(0, 10000, size=30)
+    pd.DataFrame({"sqft": sqft, "rooms": rng.integers(1, 6, size=30), "price": price}).to_csv(
+        csv_file, index=False
+    )
+
+    state: AgentMLState = {
+        "raw_file_path": str(csv_file),
+        "target_column": "price",
+        "task_type": "regression",
+        "errors": [],
+    }
+
+    result = preprocessing_agent(state)
+    df_clean = pd.read_csv(result["clean_dataset_path"])
+
+    assert "sqft" in df_clean.columns
+    assert "rooms" in df_clean.columns
+    assert "price" in df_clean.columns
+    assert not any(c.startswith("pc_") for c in df_clean.columns)
+    assert not any(
+        e["operation"] == "dimension_reduction"
+        for e in result["preprocessing_log"]
+    )
+
+    # Also: an existing supervised call that omits task_type entirely (older
+    # direct-call tests) must behave identically — no reduction.
+    del state["task_type"]
+    result2 = preprocessing_agent(state)
+    df_clean2 = pd.read_csv(result2["clean_dataset_path"])
+    assert "sqft" in df_clean2.columns
+    assert not any(c.startswith("pc_") for c in df_clean2.columns)
+
+
+def test_preprocessing_dim_reduction_skipped_for_small_feature_sets(tmp_path, monkeypatch):
+    """
+    Clustering with only 1 feature (or 1 row) skips reduction without erroring.
+    """
+    monkeypatch.delenv("PREPROCESS_DIM_REDUCTION_COMPONENTS", raising=False)
+
+    csv_file = tmp_path / "single.csv"
+    pd.DataFrame({"only_feature": np.arange(20.0)}).to_csv(csv_file, index=False)
+
+    state: AgentMLState = {
+        "raw_file_path": str(csv_file),
+        "target_column": None,
+        "task_type": "clustering",
+        "errors": [],
+    }
+
+    result = preprocessing_agent(state)
+    df_clean = pd.read_csv(result["clean_dataset_path"])
+
+    assert "only_feature" in df_clean.columns
+    assert not any(c.startswith("pc_") for c in df_clean.columns)
+    assert not any(e.get("recoverable") is False for e in result["errors"])
 
 def test_preprocessing_applies_selected_and_custom_features(tmp_path):
     """

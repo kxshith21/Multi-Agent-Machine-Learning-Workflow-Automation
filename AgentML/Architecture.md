@@ -43,6 +43,13 @@ User uploads CSV
 
 Supervised/Unsupervised "pipelines" are **not agents** — they are conditional branches the Orchestrator takes based on Problem Detection's output. Branch-specific logic (train/test split vs. dimensionality prep) lives inside the Preprocessing Agent (task-aware step, run after task type is known) and inside the Experiment Orchestrator (different model zoo per task).
 
+> **Task-aware prep:** for `task_type == "clustering"` only, the Preprocessing Agent
+> compresses the imputed/scaled/encoded feature matrix to `min(50, n_features)`
+> components (`TruncatedSVD` by default; `PCA` or `off` configurable via
+> `PREPROCESS_DIM_REDUCTION`, component count via `PREPROCESS_DIM_REDUCTION_COMPONENTS`)
+> before the model zoo runs. Supervised tasks keep raw, interpretable features.
+> A failed reduction is recoverable and falls back to the unreduced matrix.
+
 ## 2. Agents (7 total)
 
 | # | Agent | Responsibility |
@@ -51,8 +58,8 @@ Supervised/Unsupervised "pipelines" are **not agents** — they are conditional 
 | 2 | Dataset Profiling | Structure/dtype/missing/duplicate analysis |
 | 3 | Data Preprocessing | Cleaning, encoding, scaling, task-aware prep |
 | 4 | Problem Detection | Task type + target column inference, with reasoning |
-| 5 | Experiment Orchestrator | Runs model zoo concurrently, logs all results |
-| 6 | Model Evaluation | Task-appropriate metrics, ranking, best-model selection |
+| 5 | Experiment Orchestrator | Runs model zoo concurrently, logs all results. Imbalanced classification: `class_weight="balanced"` (LR/RF/SVC) + per-dataset XGBoost `scale_pos_weight` (no SMOTE — sklearn/xgboost only) |
+| 6 | Model Evaluation | Task-appropriate metrics, ranking, best-model selection. Classification ranks by F1 (macro), tiebreaker precision; `pr_auc` reported for binary; minority <10% adds an imbalance explanation to the reasoning |
 | 7 | Report Generation | Final explainable report (LLM-narrated from structured state) |
 
 ## 3. Shared State Schema
@@ -67,6 +74,7 @@ class AgentMLState(TypedDict):
     target_column: str | None
     detection_confidence: float
     detection_reasoning: str
+    class_balance: dict              # classification only: normalized value_counts (e.g. {"0": 0.9417, "1": 0.0583}) — surfaced before training
     experiment_results: list[dict]
     best_model_id: str
     ranking: list[dict]
@@ -83,7 +91,7 @@ class AgentMLState(TypedDict):
 | LLM (reasoning + report narration) | Groq API (provider abstracted at code level) |
 | Data handling | pandas |
 | Profiling | pandas + ydata-profiling (or hand-rolled summary functions) |
-| Preprocessing | scikit-learn (ColumnTransformer, SimpleImputer, OneHotEncoder, StandardScaler) |
+| Preprocessing | scikit-learn (ColumnTransformer, SimpleImputer, OneHotEncoder, StandardScaler, TruncatedSVD/PCA for clustering) |
 | Modeling | scikit-learn + xgboost |
 | Concurrency | concurrent.futures.ThreadPoolExecutor |
 | Experiment logging | JSON to state (v1); MLflow optional later |
@@ -144,6 +152,21 @@ Implemented via LangGraph's `interrupt()`, same pattern as CRCM. Three checkpoin
 1. Post Problem Detection (conditional — only if `detection_confidence` below threshold, e.g. 0.7)
 2. Pre Experiment Orchestrator (optional, always offered — user can accept defaults or adjust scope)
 3. Post Model Evaluation (always offered — confirm or override best model pick)
+
+## 6a. Metrics & Ranking
+Rule-based and reproducible (`src/metrics/task_metrics.py`).
+
+| Task type | Primary (ranking) | Tiebreaker | Reported (never ranked) |
+|---|---|---|---|
+| Classification | `f1` (macro, higher better) | `precision` (macro) | `recall`, `accuracy`, `pr_auc` (binary only) |
+| Regression | `r2` (higher better) | `rmse` (lower better) | `mae` |
+| Clustering | `silhouette` (higher better, NaN = worst) | `n_clusters` | `n_noise` |
+
+Classification deliberately ranks on **F1 rather than accuracy** so a
+majority-class baseline cannot win an imbalanced dataset by predicting the modal
+class. `class_balance` is logged by Problem Detection on the resolved target and
+surfaced in the report; when any class is <10% of samples, the evaluation
+reasoning states that F1/PR-AUC were prioritized over accuracy.
 
 ## 7. Error Handling Flow
 See Rules.md §4 for the full policy. Summary: profiling failures are hard stops; preprocessing/experiment failures are logged and skipped where possible; ambiguous detection routes to a checkpoint rather than a silent guess.

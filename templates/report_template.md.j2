@@ -16,6 +16,7 @@
     preprocessing_narration str
     task_type           str
     target_column       str | None
+    class_balance       dict  {str(label): share} — may be empty
     detection_confidence float
     detection_reasoning str
     detection_narration str
@@ -112,6 +113,7 @@ No preprocessing transformations were logged.
 | **Detected task type** | **{{ task_type | upper }}** |
 | **Target column** | {{ target_column if target_column else '*(none — unsupervised)*' }} |
 | **Confidence** | {{ (detection_confidence * 100) | round(1) }}% |
+{% if class_balance %}| **Class distribution** | {% for k, v in class_balance.items() %}`{{ k }}`: {{ (v * 100) | round(1) }}%{% if not loop.last %} · {% endif %}{% endfor %} |{% endif %}
 
 **Rule-based reasoning:** {{ detection_reasoning }}
 

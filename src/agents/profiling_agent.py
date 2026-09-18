@@ -45,7 +45,7 @@ def detect_feature_suggestions(df: pd.DataFrame, profile: dict) -> list[dict]:
     # 1. Datetime columns → suggest decomposing into year/month/day/weekday
     for col in df.columns:
         is_parsed_datetime = pd.api.types.is_datetime64_any_dtype(df[col])
-        if not is_parsed_datetime and pd.api.types.is_object_dtype(df[col]):
+        if not is_parsed_datetime and (pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col])):
             # Tolerate string/object columns that read like a datetime (common
             # after a CSV round-trip) so the suggestion is still offered.
             try:

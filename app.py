@@ -1,14 +1,16 @@
 """
-AgentML — Streamlit Demo UI (Phase 7)
+AgentML — Multi-Agent ML Experiment Orchestrator UI
 File: app.py
 
-A technical, clear, and data-forward dashboard matching Design.md specifications.
-Supports:
-  - Off-white base background and clean white panel styling.
-  - Custom horizontal 7-node pipeline stepper (Completed, Active, Interrupted, Pending).
-  - Collapsible per-agent cards (expanded for currently active step).
-  - Amber-accented human-in-the-loop checkpoint interfaces.
-  - Factual representation of results and printable report pane with download buttons.
+A modern, high-contrast, structured Streamlit interface for the 7-agent LangGraph ML pipeline.
+Features:
+  - 3-Tab workflow layout: 1. Upload & Setup | 2. Pipeline & Agents | 3. Results & Final Report
+  - 7-Stage visual progress stepper with status indicators (Pending, Running, Complete, Checkpoint, Failed)
+  - Rich structured agent output cards using st.metric, st.dataframe, and formatted text (no raw JSON dumps)
+  - Dedicated "Review & Approve" human-in-the-loop checkpoint cards for all 4 LangGraph interrupts
+  - Collapsible developer inspect panes for raw state JSON payloads
+  - Clean error banners with recovery actions
+  - Full rendered Markdown & PDF report viewer with download actions
 """
 
 from __future__ import annotations
@@ -23,775 +25,969 @@ from src.orchestrator.graph import build_graph
 from src.orchestrator.state import AgentMLState
 from src.utils.safe_formula import FormulaValidationError, validate_formula
 
-# Set page config first
+# ---------------------------------------------------------------------------
+# Streamlit Page Configuration
+# ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="AgentML — Workflow Automation",
+    page_title="AgentML — Multi-Agent ML Orchestrator",
+    page_icon="🤖",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS Styling (Design.md §2, §3, §4)
+# Custom CSS Styling
 # ---------------------------------------------------------------------------
-
 def apply_custom_theme():
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
-    
-    /* Main Background & Fonts */
-    .stApp {
-        background-color: #FAFAF8;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+    /* Global Typography */
+    html, body, [class*="css"], .stApp {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
-    
-    h1, h2, h3, h4, h5, h6, p, span, label, li {
-        font-family: 'Inter', sans-serif !important;
-        color: #1A1A1A;
-    }
-    
-    /* Secondary/Slate text class */
-    .slate-text {
-        color: #5C6470;
-        font-size: 14px;
-        line-height: 1.5;
-    }
-    
-    /* Code / Data Metrics styling */
-    code, pre, .mono-text, table, th, td {
+
+    code, pre, .mono {
         font-family: 'JetBrains Mono', monospace !important;
-        font-size: 13px !important;
+        font-size: 12.5px !important;
     }
-    
-    /* Border/Divider style */
-    hr {
-        border-color: #E4E6EA !important;
+
+    /* Main Container Polish */
+    .main .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+        max-width: 1280px;
     }
-    
-    /* Custom Card Containers */
-    .card-panel {
-        background-color: #FFFFFF;
-        border: 1px solid #E4E6EA;
+
+    /* Stepper Styling */
+    .stepper-container {
+        display: flex;
+        justify-content: space-between;
+        align-items: stretch;
+        gap: 8px;
+        margin-bottom: 1.25rem;
+        padding: 6px;
+        background: #F8F9FA;
+        border: 1px solid #E9ECEF;
+        border-radius: 10px;
+    }
+
+    .step-box {
+        flex: 1;
+        padding: 10px 8px;
         border-radius: 8px;
-        padding: 1.5rem;
-        margin-bottom: 1rem;
+        text-align: center;
+        background: #FFFFFF;
+        border: 1px solid #E2E8F0;
+        transition: all 0.15s ease-in-out;
     }
-    
-    /* Amber Accent Left-Border for Checkpoint Cards */
-    .checkpoint-card {
-        background-color: #FFFFFF;
-        border-left: 5px solid #C77D26;
-        border-top: 1px solid #E4E6EA;
-        border-right: 1px solid #E4E6EA;
-        border-bottom: 1px solid #E4E6EA;
+
+    .step-box.step-pending {
+        border-color: #E2E8F0;
+        background: #FFFFFF;
+        opacity: 0.75;
+    }
+
+    .step-box.step-running {
+        border-color: #3182CE;
+        background: #EBF8FF;
+        box-shadow: 0 0 0 1px #3182CE;
+    }
+
+    .step-box.step-complete {
+        border-color: #38A169;
+        background: #F0FFF4;
+    }
+
+    .step-box.step-checkpoint {
+        border-color: #D69E2E;
+        background: #FFFFF0;
+        box-shadow: 0 0 0 1px #D69E2E;
+    }
+
+    .step-box.step-failed {
+        border-color: #E53E3E;
+        background: #FFF5F5;
+    }
+
+    .step-icon {
+        font-size: 16px;
+        font-weight: 700;
+        margin-bottom: 2px;
+    }
+
+    .step-label {
+        font-size: 11.5px;
+        font-weight: 600;
+        color: #2D3748;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .step-subtext {
+        font-size: 10px;
+        color: #718096;
+        font-family: 'JetBrains Mono', monospace;
+        margin-top: 2px;
+    }
+
+    /* Human Action Checkpoint Banner */
+    .checkpoint-banner {
+        background-color: #FFFDF5;
+        border-left: 6px solid #D69E2E;
+        border-top: 1px solid #F6E05E;
+        border-right: 1px solid #F6E05E;
+        border-bottom: 1px solid #F6E05E;
         border-radius: 8px;
-        padding: 1.5rem;
+        padding: 1.25rem 1.5rem;
         margin-bottom: 1.5rem;
     }
-    
-    .checkpoint-title {
-        color: #C77D26;
-        font-family: 'Inter', sans-serif;
-        font-weight: 600;
+
+    .checkpoint-header {
         font-size: 16px;
-        margin-bottom: 0.5rem;
+        font-weight: 700;
+        color: #975A16;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
     }
-    
-    /* Muted Success green background highlight */
-    .success-badge {
-        background-color: #E6F4EA;
-        color: #2E7D5B;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-weight: 500;
+
+    .checkpoint-desc {
+        color: #4A5568;
+        font-size: 13.5px;
+        line-height: 1.5;
+        margin-bottom: 12px;
     }
-    
-    /* Expander card background overrides */
-    div[data-testid="stExpander"] {
-        background-color: #FFFFFF !important;
-        border: 1px solid #E4E6EA !important;
-        border-radius: 8px !important;
-        margin-bottom: 1rem !important;
-        box-shadow: none !important;
-    }
-    
-    /* Report Container style */
-    .report-container {
-        background-color: #FFFFFF;
-        border: 1px solid #E4E6EA;
+
+    /* Report Container */
+    .report-card {
+        background: #FFFFFF;
+        border: 1px solid #E2E8F0;
         border-radius: 8px;
-        padding: 2.5rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        font-family: 'Inter', sans-serif;
+        padding: 2rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        line-height: 1.65;
     }
+
+    /* Badge Pills */
+    .badge-pill {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .badge-pill-blue { background: #EBF8FF; color: #2B6CB0; border: 1px solid #BEE3F8; }
+    .badge-pill-green { background: #F0FFF4; color: #276749; border: 1px solid #C6F6D5; }
+    .badge-pill-amber { background: #FFFFF0; color: #975A16; border: 1px solid #FEFCBF; }
     </style>
     """, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
-# Stepper Visualisation (Design.md §4, §5)
+# 7-Agent Node Registry & Helpers
 # ---------------------------------------------------------------------------
-
-# Node registry: (node_name, display_label, detail_key) in execution order
 WORKFLOW_NODES = [
-    ("dataset_profiling", "Profiling", "dataset_profile"),
-    ("problem_detection", "Detection", "detection"),
-    ("feature_engineering", "Features", "features"),
-    ("data_preprocessing", "Preprocessing", "preprocessing"),
-    ("experiment_orchestrator", "Training", "experiments"),
-    ("model_evaluation", "Evaluation", "evaluation"),
-    ("report_generation", "Report", "report"),
+    ("dataset_profiling", "1. Profiling", "Data profiling & feature suggestions"),
+    ("problem_detection", "2. Detection", "Task & target column detection"),
+    ("feature_engineering", "3. Features", "Feature engineering selection"),
+    ("data_preprocessing", "4. Preprocessing", "Cleaning, encoding & scaling"),
+    ("experiment_orchestrator", "5. Training", "Concurrent model zoo execution"),
+    ("model_evaluation", "6. Evaluation", "Leaderboard ranking & selection"),
+    ("report_generation", "7. Report", "Markdown & PDF report generation"),
 ]
 
 
-def _node_done(state: AgentMLState, node: str) -> bool:
-    """Return True if the node has produced its primary output in the state."""
+def _is_node_complete(state: AgentMLState, node_name: str) -> bool:
+    """Check if the node has produced its required artifacts in state."""
     g = state or {}
-    if node == "dataset_profiling":
+    if node_name == "dataset_profiling":
         return g.get("dataset_profile") is not None
-    if node == "problem_detection":
+    if node_name == "problem_detection":
         return g.get("task_type") is not None
-    if node == "feature_engineering":
-        # The checkpoint node is "done" once selected/custom features exist in
-        # state (whether or not anything was chosen — even an empty selection
-        # means the user resolved the checkpoint).
-        return "selected_features" in g or "custom_features" in g
-    if node == "data_preprocessing":
+    if node_name == "feature_engineering":
+        return "selected_features" in g or "custom_features" in g or g.get("clean_dataset_path") is not None
+    if node_name == "data_preprocessing":
         return bool(g.get("preprocessing_log")) or bool(g.get("clean_dataset_path"))
-    if node == "experiment_orchestrator":
+    if node_name == "experiment_orchestrator":
         return len(g.get("experiment_results") or []) > 0
-    if node == "model_evaluation":
+    if node_name == "model_evaluation":
         return len(g.get("ranking") or []) > 0
-    if node == "report_generation":
+    if node_name == "report_generation":
         return g.get("report_path") is not None
     return False
 
 
-def _node_status(state, node, current_phase, is_interrupted, hard_errors):
-    """Return one of: pending | active | warn | error | complete."""
-    if any(e.get("phase") == node and not e.get("recoverable", True)
-           for e in (state.get("errors") or [])) or (
-        node == "problem_detection" and any(
-            e.get("error_type") == "instruction_parse_error"
-            for e in (state.get("errors") or [])
-        ) and not _node_done(state, node)
-    ):
-        return "error" if not _node_done(state, node) else "complete"
+def _get_node_status(state: AgentMLState, node_name: str, current_phase: str, is_interrupted: bool) -> str:
+    """Returns one of: complete | running | checkpoint | failed | pending."""
+    g = state or {}
+    errors = g.get("errors") or []
+    
+    # Check for hard errors belonging to this node
+    if any(e.get("phase") == node_name and not e.get("recoverable", True) for e in errors):
+        if not _is_node_complete(g, node_name):
+            return "failed"
 
-    if _node_done(state, node):
+    if _is_node_complete(g, node_name):
         return "complete"
 
-    if current_phase == node:
-        return "warn" if is_interrupted else "active"
+    if current_phase == node_name or (node_name == "feature_engineering" and is_interrupted and ("feature_suggestions" in (g.get("__interrupt__", [{}])[-1].value if is_interrupted else {}))):
+        return "checkpoint" if is_interrupted else "running"
 
     return "pending"
 
 
-def _node_summary(state, node):
-    """One-line human summary used in the status bar for a node."""
+def _get_node_summary_text(state: AgentMLState, node_name: str) -> str:
+    """One-line concise summary string for the stepper."""
     g = state or {}
-    if node == "dataset_profiling":
+    if node_name == "dataset_profiling":
         p = g.get("dataset_profile") or {}
         if p:
-            return f"{p.get('num_rows')} rows × {p.get('num_cols')} cols"
-        return "shape / dtypes / missing%"
-    if node == "problem_detection":
-        if g.get("task_type"):
-            return f"{str(g.get('task_type')).title()} → `{g.get('target_column') or '—'}`"
-        return "target + task type"
-    if node == "feature_engineering":
-        n_sel = len(g.get("selected_features") or [])
-        n_cust = len(g.get("custom_features") or [])
-        if n_sel or n_cust:
-            return f"{n_sel} suggested + {n_cust} custom"
-        return "feature selection"
-    if node == "data_preprocessing":
-        n = len(g.get("preprocessing_log") or [])
-        return f"{n} operations" if n else "clean dataset"
-    if node == "experiment_orchestrator":
-        n = len(g.get("experiment_results") or [])
-        return f"{n} models" if n else "run model zoo"
-    if node == "model_evaluation":
+            return f"{p.get('num_rows', 0)}r × {p.get('num_cols', 0)}c"
+        return "Schema & Missing"
+    if node_name == "problem_detection":
+        tt = g.get("task_type")
+        if tt:
+            return f"{str(tt).title()}"
+        return "Target & Type"
+    if node_name == "feature_engineering":
+        sel = len(g.get("selected_features") or [])
+        cust = len(g.get("custom_features") or [])
+        if sel or cust:
+            return f"{sel + cust} engineered"
+        return "Feature Selection"
+    if node_name == "data_preprocessing":
+        log_len = len(g.get("preprocessing_log") or [])
+        return f"{log_len} steps applied" if log_len else "Clean & Encode"
+    if node_name == "experiment_orchestrator":
+        exps = len(g.get("experiment_results") or [])
+        return f"{exps} models trained" if exps else "Model Zoo"
+    if node_name == "model_evaluation":
         bm = g.get("best_model_id")
-        return f"best: {bm}" if bm else "leaderboard"
-    if node == "report_generation":
-        return "Markdown + PDF" if g.get("report_path") else "full report"
+        return f"Best: {bm}" if bm else "Leaderboard"
+    if node_name == "report_generation":
+        return "Report Ready" if g.get("report_path") else "Final Summary"
     return ""
 
 
-STATUS_BADGE = {
-    "pending": "○",
-    "active": "●",
-    "warn": "⚠",
-    "error": "✗",
-    "complete": "✓",
-}
-
-
-def render_status_bar(state, current_phase, is_interrupted):
-    """Render a compact, clickable workflow status bar.
-
-    Each workflow node is a clickable card showing its status badge + a one-line
-    summary. Implementation details stay hidden until a node is clicked.
-    Returns the currently selected node id.
-    """
-    hard_errors = [e for e in (state.get("errors") or []) if not e.get("recoverable", True)]
-
-    # Default selection: the active running node while executing, else the
-    # first pending node at startup, else the report once complete.
-    if "selected_node" not in st.session_state:
-        node_names = dict((n, l) for n, l, _ in WORKFLOW_NODES)
-        if current_phase in node_names:
-            default = current_phase
-        else:
-            # Not yet executing a specific node (e.g. orchestrator/setup):
-            # pick the first node that is pending or currently active.
-            default = "report_generation"
-            for node, _, _ in WORKFLOW_NODES:
-                if _node_status(state, node, current_phase, is_interrupted, []) in ("active", "pending"):
-                    default = node
-                    break
-        st.session_state.selected_node = default
+# ---------------------------------------------------------------------------
+# UI Components: Horizontal Stepper
+# ---------------------------------------------------------------------------
+def render_pipeline_stepper(state: AgentMLState, current_phase: str, is_interrupted: bool):
+    """Renders the top 7-stage visual pipeline progress stepper."""
+    status_icons = {
+        "pending": ("○", "step-pending"),
+        "running": ("●", "step-running"),
+        "checkpoint": ("⚠", "step-checkpoint"),
+        "complete": ("✓", "step-complete"),
+        "failed": ("✗", "step-failed"),
+    }
 
     cols = st.columns(len(WORKFLOW_NODES))
-    selected = st.session_state.selected_node
+    completed_count = 0
 
-    bar_css = """
-    <style>
-    .wf-node {
-        border: 1px solid #E4E6EA;
-        border-radius: 8px;
-        background: #FFFFFF;
-        padding: 10px 8px;
-        text-align: center;
-        cursor: pointer;
-        transition: all 0.1s ease;
-    }
-    .wf-node .wf-badge { font-size: 16px; }
-    .wf-node .wf-name { font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: #1A1A1A; margin-top: 4px; }
-    .wf-node .wf-summary { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #5C6470; margin-top: 2px; }
-    .wf-selected { border: 2px solid #3B4C9B; box-shadow: 0 1px 4px rgba(59,76,155,0.25); }
-    .wf-active { border-color: #3B4C9B; }
-    .wf-complete { border-color: #2E7D5B; }
-    .wf-complete .wf-badge { color: #2E7D5B; }
-    .wf-warn { border-color: #C77D26; }
-    .wf-warn .wf-badge { color: #C77D26; }
-    .wf-error .wf-badge { color: #B42318; }
-    </style>
-    """
-    st.markdown(bar_css, unsafe_allow_html=True)
+    for col, (node_name, label, _) in zip(cols, WORKFLOW_NODES):
+        status = _get_node_status(state, node_name, current_phase, is_interrupted)
+        icon, css_class = status_icons[status]
+        subtext = _get_node_summary_text(state, node_name)
+        if status == "complete":
+            completed_count += 1
 
-    for col, (node, label, _) in zip(cols, WORKFLOW_NODES):
-        status = _node_status(state, node, current_phase, is_interrupted, hard_errors)
-        is_sel = node == selected
-        css_cls = f"wf-node wf-{status}" + (" wf-selected" if is_sel else "")
-        badge = STATUS_BADGE[status]
-        summary = _node_summary(state, node)
         col.markdown(
-            f'<div class="{css_cls}" data-node="{node}">'
-            f'<div class="wf-badge">{badge}</div>'
-            f'<div class="wf-name">{label}</div>'
-            f'<div class="wf-summary">{summary}</div>'
-            f"</div>",
+            f"""
+            <div class="step-box {css_class}">
+                <div class="step-icon">{icon}</div>
+                <div class="step-label">{label}</div>
+                <div class="step-subtext">{subtext}</div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
-        if col.button("Open", key=f"node_open_{node}", type="secondary", use_container_width=True):
-            st.session_state.selected_node = node
 
-    st.caption("Click a node to inspect its output. Implementation details are hidden while agents run.")
-    return st.session_state.selected_node
+    # Progress bar indicator
+    progress_val = completed_count / len(WORKFLOW_NODES)
+    st.progress(progress_val, text=f"Pipeline Progress: {completed_count}/{len(WORKFLOW_NODES)} agents completed ({int(progress_val * 100)}%)")
 
 
-def _render_profile_detail(profile):
+# ---------------------------------------------------------------------------
+# UI Components: Human-in-the-Loop Checkpoint Decision Cards
+# ---------------------------------------------------------------------------
+def render_checkpoint_card(gstate: AgentMLState, interrupt_payload: dict):
+    """Renders a dedicated, clear review & approve card for human checkpoints."""
+    msg = interrupt_payload.get("message", "Human approval required to proceed.")
+
     st.markdown(
-        f"**Shape:** `{profile.get('num_rows')} rows` × `{profile.get('num_cols')} columns` | "
-        f"**Duplicates:** `{profile.get('duplicate_count')} rows`"
+        f"""
+        <div class="checkpoint-banner">
+            <div class="checkpoint-header">⚡ Human Checkpoint Required</div>
+            <div class="checkpoint-desc">{msg}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        st.markdown("**Numeric Columns:**")
-        st.write(", ".join(f"`{c}`" for c in profile.get("numeric_cols", [])))
-    with col_t2:
-        st.markdown("**Categorical Columns:**")
-        st.write(", ".join(f"`{c}`" for c in profile.get("categorical_cols", [])))
-    st.markdown("**Missing Data Metrics (% per column):**")
-    st.json(profile.get("missing_pct", {}))
+
+    # 1. Feature Engineering Checkpoint
+    if "feature_suggestions" in interrupt_payload:
+        st.subheader("💡 Select Feature Engineering Transformations")
+        st.caption("Opt-in to suggested feature transformations or construct a custom formula. Default is to apply none.")
+        
+        suggestions = interrupt_payload.get("feature_suggestions") or []
+        checked_features = []
+
+        if suggestions:
+            st.markdown("**Suggested Features:**")
+            for sug in suggestions:
+                name = sug.get("name", "feature")
+                desc = sug.get("description", "")
+                ftype = sug.get("type", "feature")
+                if st.checkbox(f"**{name}** (`{ftype}`): {desc}", value=False, key=f"chk_{name}"):
+                    checked_features.append(name)
+        else:
+            st.info("No obvious candidate features detected for this dataset structure.")
+
+        # Custom formula
+        st.markdown("---")
+        st.markdown("**➕ Add Custom Numeric Formula (Optional)**")
+        st.caption("Allowed operators: `+`, `-`, `*`, `/`, parentheses, and existing column names.")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            custom_name = st.text_input("New Feature Name", placeholder="e.g. price_per_sqft", key="fe_name")
+        with c2:
+            custom_formula = st.text_input("Formula Expression", placeholder="e.g. price / sqft", key="fe_formula")
+
+        custom_features = []
+        if custom_name.strip() and custom_formula.strip():
+            profile = gstate.get("dataset_profile") or {}
+            avail_cols = set(profile.get("numeric_cols", []) + profile.get("categorical_cols", []))
+            try:
+                validate_formula(custom_formula, avail_cols)
+                custom_features = [{"name": custom_name.strip(), "formula": custom_formula.strip()}]
+                st.success(f"✓ Valid formula: `{custom_name.strip()} = {custom_formula.strip()}`")
+            except (FormulaValidationError, ValueError) as err:
+                st.error(f"Invalid Formula: {err}")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        col_btn1, col_btn2 = st.columns([2, 5])
+        with col_btn1:
+            if st.button("✓ Confirm & Apply Features", type="primary", use_container_width=True):
+                payload = {
+                    "selected_features": checked_features,
+                    "custom_features": custom_features,
+                }
+                with st.spinner("Applying selected features & executing preprocessing..."):
+                    res = st.session_state.graph.invoke(Command(resume=payload), st.session_state.config)
+                    st.session_state.graph_state = res
+                    st.rerun()
+        with col_btn2:
+            if st.button("Skip Feature Engineering (Apply None)", type="secondary"):
+                payload = {"selected_features": [], "custom_features": []}
+                with st.spinner("Continuing preprocessing..."):
+                    res = st.session_state.graph.invoke(Command(resume=payload), st.session_state.config)
+                    st.session_state.graph_state = res
+                    st.rerun()
+
+    # 2. Problem Detection Ambiguity Checkpoint
+    elif "detected_target_column" in interrupt_payload:
+        st.subheader("🎯 Confirm Target Column & Task Type")
+        det_target = interrupt_payload.get("detected_target_column")
+        det_task = interrupt_payload.get("detected_task_type", "classification")
+        conf = interrupt_payload.get("confidence", 0.0)
+
+        st.markdown(f"Detected: Target = `{det_target}`, Task = `{str(det_task).upper()}` (Confidence: `{conf * 100:.1f}%`)")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            confirmed_target = st.text_input("Target Column Name", value=det_target or "")
+        with c2:
+            task_options = ["classification", "regression", "clustering"]
+            idx = task_options.index(det_task) if det_task in task_options else 0
+            confirmed_task = st.selectbox("Task Type", options=task_options, index=idx)
+
+        col_b1, col_b2 = st.columns([2, 5])
+        with col_b1:
+            if st.button("✓ Confirm & Proceed", type="primary", use_container_width=True):
+                payload = {
+                    "target_column": confirmed_target.strip() if confirmed_target.strip() else None,
+                    "task_type": confirmed_task,
+                }
+                with st.spinner("Resuming pipeline..."):
+                    res = st.session_state.graph.invoke(Command(resume=payload), st.session_state.config)
+                    st.session_state.graph_state = res
+                    st.rerun()
+
+    # 3. Experiment Scope Checkpoint
+    elif "default_scope" in interrupt_payload:
+        st.subheader("⚙️ Configure Model Zoo Execution Scope")
+        default_scope = interrupt_payload.get("default_scope", {})
+        available_models = interrupt_payload.get("available_models", [])
+
+        st.markdown(f"**Available Models in Zoo:** `{len(available_models)} candidate models` ({', '.join(available_models)})")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            max_exps = st.slider("Max Models to Evaluate", min_value=1, max_value=max(len(available_models), 1), value=default_scope.get("max_experiments", len(available_models)))
+        with c2:
+            max_workers = st.slider("Concurrent Thread Workers", min_value=1, max_value=8, value=default_scope.get("max_workers", 4))
+        with c3:
+            time_cap = st.number_input("Timeout per Model (seconds, 0=unlimited)", min_value=0, value=int(default_scope.get("time_cap_seconds", 0)))
+
+        col_b1, col_b2 = st.columns([2, 5])
+        with col_b1:
+            if st.button("✓ Start Model Training", type="primary", use_container_width=True):
+                payload = {
+                    "max_experiments": max_exps,
+                    "max_workers": max_workers,
+                    "time_cap_seconds": time_cap,
+                }
+                with st.spinner("Executing model zoo concurrently..."):
+                    res = st.session_state.graph.invoke(Command(resume=payload), st.session_state.config)
+                    st.session_state.graph_state = res
+                    st.rerun()
+
+    # 4. Best Model Leaderboard Override Checkpoint
+    elif "default_best_model_id" in interrupt_payload:
+        st.subheader("🏆 Confirm Winning Model Selection")
+        default_best = interrupt_payload.get("default_best_model_id")
+        ranking = interrupt_payload.get("ranking", [])
+        
+        st.markdown(f"The evaluation agent ranked **`{default_best}`** in 1st place based on primary validation performance.")
+        
+        if ranking:
+            st.markdown("**Evaluated Leaderboard:**")
+            df_rank = pd.DataFrame(ranking)
+            display_cols = [c for c in ["rank", "model_name", "primary_metric", "primary_value", "runtime_seconds"] if c in df_rank.columns]
+            st.dataframe(df_rank[display_cols], use_container_width=True)
+
+        model_options = [r["model_id"] for r in ranking]
+        if default_best not in model_options and default_best != "none":
+            model_options.insert(0, default_best)
+
+        selected_best = st.selectbox(
+            "Select Approved Winning Model:",
+            options=model_options,
+            index=model_options.index(default_best) if default_best in model_options else 0,
+        )
+
+        col_b1, col_b2 = st.columns([2, 5])
+        with col_b1:
+            if st.button("✓ Confirm Winning Model & Generate Report", type="primary", use_container_width=True):
+                payload = {"best_model_id": selected_best}
+                with st.spinner("Finalizing evaluation & generating report..."):
+                    res = st.session_state.graph.invoke(Command(resume=payload), st.session_state.config)
+                    st.session_state.graph_state = res
+                    st.rerun()
 
 
-def render_node_detail(gstate, node, current_phase, is_interrupted):
-    """Render the detail panel for a single selected workflow node.
-
-    If the node is currently running (active) but not yet done, show a compact
-    'running' status instead of implementation internals. If it has produced
-    output, show that node's individual output.
-    """
-    done = _node_done(gstate, node)
-    active = current_phase == node and not is_interrupted
-
-    if not done and not active:
+# ---------------------------------------------------------------------------
+# UI Components: Structured Agent Cards
+# ---------------------------------------------------------------------------
+def render_profiling_card(state: AgentMLState):
+    """Render Dataset Profiling Agent outputs in clean structured cards."""
+    profile = state.get("dataset_profile") or {}
+    if not profile:
         st.info("Pending execution...")
         return
-    if not done and active:
-        label = dict((n, l) for n, l, _ in WORKFLOW_NODES).get(node, node)
-        st.markdown(f"### {label}")
-        st.markdown("**● Running…**")
-        st.markdown('<p class="slate-text">This step is executing. Its output will appear here when complete.</p>', unsafe_allow_html=True)
+
+    # Metrics Row
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Rows", f"{profile.get('num_rows', 0):,}")
+    m2.metric("Columns", f"{profile.get('num_cols', 0):,}")
+    m3.metric("Duplicate Rows", f"{profile.get('duplicate_count', 0):,}")
+    m4.metric("Numeric Features", len(profile.get("numeric_cols", [])))
+    m5.metric("Categorical Features", len(profile.get("categorical_cols", [])))
+
+    # Column Summary Table
+    st.markdown("##### 📋 Column Schema & Missing Values")
+    col_rows = []
+    dtypes = profile.get("dtypes", {})
+    missing_pct = profile.get("missing_pct", {})
+    col_stats = profile.get("column_stats", {})
+
+    for col_name, dtype in dtypes.items():
+        stats = col_stats.get(col_name, {})
+        missing = missing_pct.get(col_name, 0.0)
+        col_type = "Numeric" if col_name in profile.get("numeric_cols", []) else "Categorical"
+        
+        sample_stat = ""
+        if col_type == "Numeric":
+            mean_val = stats.get("mean")
+            sample_stat = f"Mean: {mean_val:.2f}, Min: {stats.get('min')}, Max: {stats.get('max')}" if mean_val is not None else "—"
+        else:
+            top_v = stats.get("top_value")
+            sample_stat = f"Top: '{top_v}' (freq: {stats.get('top_freq')})" if top_v is not None else "—"
+
+        col_rows.append({
+            "Column": col_name,
+            "Type": col_type,
+            "Dtype": dtype,
+            "Missing %": f"{missing:.1f}%",
+            "Unique Values": stats.get("unique_count", "—"),
+            "Summary Stats": sample_stat,
+        })
+
+    if col_rows:
+        st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
+
+    # Feature suggestions detected
+    suggestions = state.get("feature_suggestions") or []
+    if suggestions:
+        st.markdown("##### 💡 Detected Feature Engineering Opportunities")
+        for s in suggestions:
+            st.markdown(f"- **`{s.get('name')}`** ({s.get('type')}): {s.get('description')}")
+
+    # Collapsed raw json
+    with st.expander("🔍 View Raw Profiling JSON Payload", expanded=False):
+        st.json(profile)
+
+
+def render_problem_detection_card(state: AgentMLState):
+    """Render Problem Detection Agent outputs."""
+    task_type = state.get("task_type")
+    if not task_type:
+        st.info("Pending execution...")
         return
 
-    if node == "dataset_profiling":
-        st.markdown("### Dataset Profiling")
-        _render_profile_detail(gstate.get("dataset_profile") or {})
-    elif node == "problem_detection":
-        st.markdown("### Problem Detection")
-        user_instr = (gstate.get("user_instruction") or "").strip()
-        if user_instr:
-            st.markdown(f"> **Your instruction:** _{user_instr}_")
-        st.markdown(f"**Task Type:** `{gstate.get('task_type', '').upper()}`")
-        st.markdown(f"**Target Column:** `{gstate.get('target_column')}`")
-        st.markdown(f"**Confidence:** `{gstate.get('detection_confidence', 0)*100:.1f}%`")
-        with st.popover("Why? (Explainable Reasoning)"):
-            st.markdown(gstate.get("detection_reasoning", "No explanation logged."))
-    elif node == "data_preprocessing":
-        st.markdown("### Data Preprocessing")
-        st.markdown(f"**Clean Dataset Path:** `{gstate.get('clean_dataset_path')}`")
-        log_entries = gstate.get("preprocessing_log", [])
-        if log_entries:
-            st.table(pd.DataFrame(log_entries))
-        else:
-            st.info("No preprocessing steps required.")
-    elif node == "feature_engineering":
-        st.markdown("### Feature Engineering Selection")
-        selected = gstate.get("selected_features") or []
-        custom = gstate.get("custom_features") or []
-        log_entries = gstate.get("feature_engineering_log") or []
-        if selected:
-            st.markdown("**Selected suggested features:**")
-            st.write(", ".join(f"`{s}`" for s in selected))
-        else:
-            st.markdown("**Selected suggested features:** _none_")
-        if custom:
-            st.markdown("**Custom features:**")
-            for cf in custom:
-                st.markdown(f"- `{cf.get('name')}` = `{cf.get('formula')}`")
-        st.markdown("**Feature Engineering Log:**")
-        if log_entries:
-            st.table(pd.DataFrame(log_entries))
-        else:
-            st.info("No features were created.")
-    elif node == "experiment_orchestrator":
-        st.markdown("### Model Training (Experiment Orchestrator)")
-        results = gstate.get("experiment_results", [])
-        st.success(f"Concurrently ran model zoo. {len(results)} experiments logged.")
-        st.dataframe(
-            pd.DataFrame(results)[["model_name", "success", "runtime_seconds", "error_type", "error_message"]]
-        )
-    elif node == "model_evaluation":
-        st.markdown("### Model Evaluation")
-        ranking = gstate.get("ranking", [])
-        st.markdown(f"**Top Ranked Model:** `{gstate.get('best_model_id', 'none')}`")
-        st.dataframe(
-            pd.DataFrame(ranking)[["rank", "model_name", "primary_metric", "primary_value", "runtime_seconds"]]
-        )
-        with st.popover("Why? (Explainable Evaluation Reasoning)"):
-            st.markdown(gstate.get("evaluation_reasoning", "No evaluation reasoning logged."))
-    elif node == "report_generation":
-        st.markdown("### Report Viewer")
-        report_path = gstate.get("report_path")
-        if report_path and os.path.exists(report_path):
-            with open(report_path, "r", encoding="utf-8") as f:
-                report_md = f.read()
-            st.markdown('<div class="report-container">', unsafe_allow_html=True)
-            st.markdown(report_md)
-            st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
-            col_d1, col_d2 = st.columns(2)
-            with col_d1:
-                st.download_button("Download Markdown Report", data=report_md,
-                                   file_name=os.path.basename(report_path), mime="text/markdown",
-                                   key=f"dl_md_node_{st.session_state.get('session_id', 'default')}")
-            with col_d2:
-                pdf_path = report_path.replace(".md", ".pdf")
-                if os.path.exists(pdf_path):
-                    with open(pdf_path, "rb") as f:
-                        st.download_button("Download PDF Report", data=f.read(),
-                                           file_name=os.path.basename(pdf_path), mime="application/pdf",
-                                           key=f"dl_pdf_node_{st.session_state.get('session_id', 'default')}")
-        else:
-            st.warning("Report file was not found at the expected path.")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Detected Task Type", str(task_type).upper())
+    m2.metric("Target Column", state.get("target_column") or "None (Unsupervised)")
+    conf = state.get("detection_confidence", 0.0)
+    m3.metric("Detection Confidence", f"{conf * 100:.1f}%")
 
+    user_instr = state.get("user_instruction")
+    if user_instr and user_instr.strip():
+        st.info(f"**User Prediction Goal:** *\"{user_instr.strip()}\"*")
 
-def render_workflow_summary(gstate):
-    """Show the entire workflow at a glance once the pipeline has finished."""
-    st.markdown("### Workflow Complete — Summary")
-    rows = []
-    for node, label, _ in WORKFLOW_NODES:
-        status = _node_status(gstate, node, "report_generation", False, [])
-        rows.append({
-            "Stage": label,
-            "Status": "✓ Done" if status == "complete" else ("Pending" if status == "pending" else "…"),
-            "Result": _node_summary(gstate, node),
+    reasoning = state.get("detection_reasoning")
+    if reasoning:
+        st.markdown("##### 🧠 Explainable Detection Reasoning")
+        st.markdown(f"> {reasoning}")
+
+    with st.expander("🔍 View Raw Detection State", expanded=False):
+        st.json({
+            "task_type": task_type,
+            "target_column": state.get("target_column"),
+            "detection_confidence": conf,
+            "detection_reasoning": reasoning,
         })
-    st.table(pd.DataFrame(rows))
 
-    p = gstate.get("dataset_profile") or {}
+
+def render_feature_engineering_card(state: AgentMLState):
+    """Render Feature Engineering Selection outputs."""
+    selected = state.get("selected_features") or []
+    custom = state.get("custom_features") or []
+    fe_log = state.get("feature_engineering_log") or []
+
+    if "selected_features" not in state and not fe_log:
+        st.info("Pending execution...")
+        return
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Selected Suggested Features", len(selected))
+    m2.metric("Custom Formulas Created", len(custom))
+    m3.metric("Total Transformations Applied", len(fe_log))
+
+    if custom:
+        st.markdown("##### ➕ Custom Formulas")
+        for cf in custom:
+            st.markdown(f"- `{cf.get('name')}` = `{cf.get('formula')}`")
+
+    if fe_log:
+        st.markdown("##### 📜 Feature Engineering Operation Log")
+        st.dataframe(pd.DataFrame(fe_log), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No custom or suggested features were selected.")
+
+    with st.expander("🔍 View Raw Feature Engineering Log", expanded=False):
+        st.json({"selected_features": selected, "custom_features": custom, "feature_engineering_log": fe_log})
+
+
+def render_preprocessing_card(state: AgentMLState):
+    """Render Data Preprocessing Agent outputs."""
+    clean_path = state.get("clean_dataset_path")
+    prep_log = state.get("preprocessing_log") or []
+
+    if not clean_path and not prep_log:
+        st.info("Pending execution...")
+        return
+
+    m1, m2 = st.columns(2)
+    m1.metric("Clean Dataset Path", clean_path or "—")
+    m2.metric("Total Preprocessing Operations", len(prep_log))
+
+    if prep_log:
+        st.markdown("##### 🧹 Preprocessing Operations Log")
+        st.dataframe(pd.DataFrame(prep_log), use_container_width=True, hide_index=True)
+    else:
+        st.info("No preprocessing steps required.")
+
+    with st.expander("🔍 View Raw Preprocessing Log", expanded=False):
+        st.json({"clean_dataset_path": clean_path, "preprocessing_log": prep_log})
+
+
+def render_experiment_card(state: AgentMLState):
+    """Render Model Training / Experiment Orchestrator outputs."""
+    results = state.get("experiment_results") or []
+    if not results:
+        st.info("Pending execution...")
+        return
+
+    successful = [r for r in results if r.get("success") is True]
+    failed = [r for r in results if r.get("success") is not True]
+    total_time = sum(r.get("runtime_seconds", 0) for r in results)
+
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Rows", p.get("num_rows", "—"))
-    m2.metric("Columns", p.get("num_cols", "—"))
-    m3.metric("Task Type", str(gstate.get("task_type", "—")).title())
-    m4.metric("Best Model", gstate.get("best_model_id", "—"))
+    m1.metric("Total Models Evaluated", len(results))
+    m2.metric("Successful Runs", len(successful))
+    m3.metric("Failed Runs", len(failed))
+    m4.metric("Total Train Time", f"{total_time:.2f}s")
 
-    st.markdown(f"**Target Column:** `{gstate.get('target_column')}`   "
-                f"**Confidence:** `{gstate.get('detection_confidence', 0)*100:.1f}%`")
+    st.markdown("##### 🧪 Evaluated Models Summary")
+    table_rows = []
+    for r in results:
+        table_rows.append({
+            "Model Name": r.get("model_name"),
+
+
+
+
+
+        
+            "Family": r.get("family", "—"),
+            "Status": "✓ Success" if r.get("success") else "✗ Failed",
+            "Runtime (s)": f"{r.get('runtime_seconds', 0):.3f}",
+            "Error / Details": r.get("error_message") or "Completed without errors",
+        })
+    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+    with st.expander("🔍 View Raw Experiment Results Payload", expanded=False):
+        st.json(results)
+
+
+def render_evaluation_card(state: AgentMLState):
+    """Render Model Evaluation Agent outputs."""
+    ranking = state.get("ranking") or []
+    best_model = state.get("best_model_id")
+
+    if not ranking and not best_model:
+        st.info("Pending execution...")
+        return
+
+    m1, m2 = st.columns(2)
+    m1.metric("🏆 Top-Ranked Model", best_model or "None")
+    
+    top_score = "—"
+    if ranking:
+        top_entry = ranking[0]
+        top_score = f"{top_entry.get('primary_metric', 'Metric')}: {top_entry.get('primary_value', 0):.4f}"
+    m2.metric("Primary Metric Score", top_score)
+
+    if ranking:
+        st.markdown("##### 🥇 Model Evaluation Leaderboard")
+        df_rank = pd.DataFrame(ranking)
+        display_cols = [c for c in ["rank", "model_name", "primary_metric", "primary_value", "runtime_seconds", "family"] if c in df_rank.columns]
+        st.dataframe(df_rank[display_cols], use_container_width=True, hide_index=True)
+
+    reasoning = state.get("evaluation_reasoning")
+    if reasoning:
+        st.markdown("##### 📊 Evaluation Narrative")
+        st.markdown(f"> {reasoning}")
+
+    with st.expander("🔍 View Raw Leaderboard Payload", expanded=False):
+        st.json({"best_model_id": best_model, "ranking": ranking, "evaluation_reasoning": reasoning})
+
+
+def render_report_agent_card(state: AgentMLState):
+    """Render Report Generation Agent outputs."""
+    report_path = state.get("report_path")
+    if not report_path:
+        st.info("Pending execution...")
+        return
+
+    st.success(f"✓ Report successfully generated at `{report_path}`")
+    pdf_path = report_path.replace(".md", ".pdf")
+    has_pdf = os.path.exists(pdf_path)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**Markdown Output:** `{os.path.basename(report_path)}`")
+    with c2:
+        st.markdown(f"**PDF Output:** `{os.path.basename(pdf_path) if has_pdf else 'N/A'}`")
+
+
+# ---------------------------------------------------------------------------
+# Tab 3: Final Results & Report View
+# ---------------------------------------------------------------------------
+def render_final_results_tab(gstate: AgentMLState):
+    """Renders the comprehensive Results & Final Report tab."""
     report_path = gstate.get("report_path")
-    if report_path and os.path.exists(report_path):
+    ranking = gstate.get("ranking") or []
+    best_model = gstate.get("best_model_id")
+
+    if not _is_node_complete(gstate, "report_generation") or not report_path:
+        st.info("⏳ The complete experiment report will be displayed here once all 7 pipeline agents finish.")
+        return
+
+    # Header Metrics
+    st.subheader("🏆 Experiment Results & Leaderboard")
+    top_score = "—"
+    metric_name = "Metric"
+    if ranking:
+        metric_name = ranking[0].get("primary_metric", "Score")
+        top_score = f"{ranking[0].get('primary_value', 0):.4f}"
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Best Model", best_model or "—")
+    m2.metric(f"Top {metric_name}", top_score)
+    m3.metric("Task Type", str(gstate.get("task_type", "—")).title())
+    m4.metric("Target Column", gstate.get("target_column") or "None")
+
+    # Ranked Leaderboard
+    if ranking:
+        st.markdown("#### Model Leaderboard")
+        df_rank = pd.DataFrame(ranking)
+        display_cols = [c for c in ["rank", "model_name", "primary_metric", "primary_value", "runtime_seconds", "family"] if c in df_rank.columns]
+        st.dataframe(df_rank[display_cols], use_container_width=True, hide_index=True)
+
+    # Rendered Markdown Report
+    st.markdown("---")
+    st.subheader("📄 Generated Experiment Report")
+
+    if os.path.exists(report_path):
         with open(report_path, "r", encoding="utf-8") as f:
-            report_md = f.read()
+            report_content = f.read()
+
+        # Download Buttons
         col_d1, col_d2 = st.columns(2)
         with col_d1:
-            st.download_button("Download Markdown Report", data=report_md,
-                               file_name=os.path.basename(report_path), mime="text/markdown",
-                               key=f"dl_md_summary_{st.session_state.get('session_id', 'default')}")
+            st.download_button(
+                "⬇️ Download Markdown Report (.md)",
+                data=report_content,
+                file_name=os.path.basename(report_path),
+                mime="text/markdown",
+                use_container_width=True,
+                type="primary",
+            )
         with col_d2:
             pdf_path = report_path.replace(".md", ".pdf")
             if os.path.exists(pdf_path):
-                with open(pdf_path, "rb") as f:
-                    st.download_button("Download PDF Report", data=f.read(),
-                                       file_name=os.path.basename(pdf_path), mime="application/pdf",
-                                       key=f"dl_pdf_summary_{st.session_state.get('session_id', 'default')}")
+                with open(pdf_path, "rb") as pf:
+                    st.download_button(
+                        "⬇️ Download PDF Report (.pdf)",
+                        data=pf.read(),
+                        file_name=os.path.basename(pdf_path),
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+            else:
+                st.caption("PDF version not available (reportlab / weasyprint).")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="report-card">', unsafe_allow_html=True)
+        st.markdown(report_content)
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.warning(f"Report file not found at path: {report_path}")
 
 
 # ---------------------------------------------------------------------------
-# App Initialization & State Management
+# App Initialization & State Setup
 # ---------------------------------------------------------------------------
-
 apply_custom_theme()
-
-st.title("AgentML")
-st.markdown(
-    '<p class="slate-text">Multi-agent machine learning workflow automation. '
-    "Transparent preprocessing, problem detection, concurrent training, and evaluation.</p>",
-    unsafe_allow_html=True
-)
 
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.graph = build_graph()
     st.session_state.config = {"configurable": {"thread_id": st.session_state.session_id}}
     st.session_state.graph_state = None
-    st.session_state.active_interrupt = None
     st.session_state.uploaded_file_path = None
-    st.session_state.selected_node = None
 
-# Sidebar reset button
+# Sidebar Controls
 with st.sidebar:
-    st.subheader("Orchestration")
-    if st.button("Reset Worksession", type="secondary"):
+    st.title("🤖 AgentML")
+    st.markdown("**Autonomous Multi-Agent Machine Learning Orchestration**")
+    st.caption("Built with LangGraph, Scikit-Learn & XGBoost.")
+    
+    st.markdown("---")
+    st.markdown("##### 📍 Active Session")
+    st.code(st.session_state.session_id[:8] + "...", language="text")
+    
+    status_label = "Ready"
+    if st.session_state.graph_state is not None:
+        g = st.session_state.graph_state
+        if "__interrupt__" in g and len(g["__interrupt__"]) > 0:
+            status_label = "Paused at Checkpoint"
+        elif _is_node_complete(g, "report_generation"):
+            status_label = "Complete"
+        else:
+            status_label = "Running"
+    
+    st.markdown(f"**Pipeline Status:** `{status_label}`")
+
+    st.markdown("---")
+    if st.button("🔄 Reset Worksession", use_container_width=True, type="secondary"):
         st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.graph = build_graph()
         st.session_state.config = {"configurable": {"thread_id": st.session_state.session_id}}
         st.session_state.graph_state = None
-        st.session_state.active_interrupt = None
         st.session_state.uploaded_file_path = None
-        st.session_state.selected_node = None
         st.rerun()
 
 # ---------------------------------------------------------------------------
-# 1. File Upload Phase
+# Main App Header & Tab Layout
 # ---------------------------------------------------------------------------
+st.title("AgentML — Multi-Agent ML Orchestrator")
+st.markdown(
+    '<p style="color: #4A5568; font-size: 14.5px; margin-top: -10px;">'
+    "Autonomous end-to-end pipeline: profiling, problem detection, interactive feature engineering, "
+    "concurrent model zoo training, ranking, and report generation."
+    "</p>",
+    unsafe_allow_html=True,
+)
 
-if st.session_state.graph_state is None:
-    st.subheader("1. Select Dataset")
-    uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
-    
+tab_upload, tab_pipeline, tab_results = st.tabs([
+    "📁 1. Upload & Setup",
+    "⚡ 2. Pipeline & Agents",
+    "📊 3. Results & Final Report",
+])
+
+# ---------------------------------------------------------------------------
+# Tab 1: Upload & Setup
+# ---------------------------------------------------------------------------
+with tab_upload:
+    st.subheader("1. Select & Configure Dataset")
+    uploaded_file = st.file_uploader("Upload CSV Dataset", type=["csv"], help="Upload a structured CSV file with numerical and/or categorical features.")
+
     if uploaded_file is not None:
-        # Create data directory if missing
         os.makedirs("data", exist_ok=True)
         temp_path = f"data/upload_{st.session_state.session_id}.csv"
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         st.session_state.uploaded_file_path = temp_path
-        
-        # Preview data
+
         df_preview = pd.read_csv(temp_path)
-        st.success(f"Loaded: `{uploaded_file.name}` ({len(df_preview)} rows, {len(df_preview.columns)} columns)")
-        st.dataframe(df_preview.head(5))
         
-        st.markdown("**Describe what to predict** *(optional)*")
+        # Summary metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Filename", uploaded_file.name)
+        m2.metric("Total Rows", f"{len(df_preview):,}")
+        m3.metric("Total Columns", len(df_preview.columns))
+
+        st.markdown("##### 🔎 First 5 Rows Preview")
+        st.dataframe(df_preview.head(5), use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("##### 💬 Natural Language Prediction Goal *(Optional)*")
         user_instruction = st.text_area(
-            "e.g. 'This is the Titanic dataset; I need the model to predict who survived or not.'",
+            "Prediction Instruction",
+            placeholder="e.g. 'Predict who survived or not based on passenger demographics' or 'Cluster customers into segments'",
             height=70,
-            label_visibility="collapsed",
-        )
-        st.caption(
-            "The pipeline will auto-detect the prediction target if you leave this blank. "
-            "You can still adjust or override it in the detection step before training."
+            help="AgentML will ground your request in the actual CSV columns and auto-select the right target and task type.",
         )
 
-        if st.button("Initialize & Start Pipeline", type="primary"):
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🚀 Initialize & Start Pipeline", type="primary", use_container_width=True):
             initial_state = {
                 "session_id": st.session_state.session_id,
                 "raw_file_path": temp_path,
-                "user_instruction": user_instruction if user_instruction.strip() else "",
+                "user_instruction": user_instruction.strip() if user_instruction else "",
                 "target_column": None,
                 "errors": [],
                 "status": "running",
             }
-            
-            # Start pipeline run
-            with st.spinner("Executing pipeline setup & dataset profiling..."):
+            with st.spinner("Starting AgentML pipeline & profiling dataset..."):
                 res = st.session_state.graph.invoke(initial_state, st.session_state.config)
                 st.session_state.graph_state = res
                 st.rerun()
 
+    elif st.session_state.graph_state is None:
+        st.info("👋 Upload a CSV file above to begin the multi-agent experiment workflow.")
+
+
 # ---------------------------------------------------------------------------
-# Active Pipeline Execution Display
+# Tab 2: Pipeline & Agents Execution
 # ---------------------------------------------------------------------------
+with tab_pipeline:
+    if st.session_state.graph_state is None:
+        st.info("No active pipeline execution. Please upload a dataset in **📁 1. Upload & Setup** to start.")
+    else:
+        gstate: AgentMLState = st.session_state.graph_state
+        is_interrupted = "__interrupt__" in gstate and len(gstate["__interrupt__"]) > 0
+        current_phase = gstate.get("current_phase", "orchestrator")
 
-if st.session_state.graph_state is not None:
-    gstate: AgentMLState = st.session_state.graph_state
-    
-    # Check for interrupts
-    is_interrupted = "__interrupt__" in gstate and len(gstate["__interrupt__"]) > 0
-    current_phase = gstate.get("current_phase", "orchestrator")
-    
-    # Render the clickable workflow status bar (hides implementation details
-    # until a node is clicked). Returns the currently selected node.
-    selected_node = render_status_bar(gstate, current_phase, is_interrupted)
-    
-    # Extract details
-    errors = gstate.get("errors", [])
-    hard_errors = [e for e in errors if not e.get("recoverable", True)]
-    
-    # If hard error occurred, abort and show error panel
-    if hard_errors:
-        st.error("Pipeline aborted due to a non-recoverable error.")
-        for err in hard_errors:
-            st.markdown(f"**[{err['phase']}]** {err['message']} *(type: {err['error_type']})*")
+        # 1. Render Stepper & Progress
+        render_pipeline_stepper(gstate, current_phase, is_interrupted)
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 2. Check for Hard Errors
+        hard_errors = [e for e in (gstate.get("errors") or []) if not e.get("recoverable", True)]
+        if hard_errors:
+            st.error("🚨 Pipeline execution encountered a non-recoverable error.")
+            for err in hard_errors:
+                st.markdown(f"**Agent [{err.get('phase', 'pipeline')}]:** {err.get('message')} *(Type: `{err.get('error_type')}`)*")
+            if st.button("Restart with New Dataset"):
+                st.session_state.session_id = str(uuid.uuid4())
+                st.session_state.graph = build_graph()
+                st.session_state.config = {"configurable": {"thread_id": st.session_state.session_id}}
+                st.session_state.graph_state = None
+                st.rerun()
+            st.stop()
+
+        # 3. Check for Human Checkpoint Interrupts
+        if is_interrupted:
+            active_interrupt = gstate["__interrupt__"][-1].value
+            render_checkpoint_card(gstate, active_interrupt)
+
+        # 4. Structured Expandable Cards for all 7 Agents
+        st.markdown("### 🤖 Agent Outputs & Logs")
         
-        if st.button("Upload Another File"):
-            st.session_state.session_id = str(uuid.uuid4())
-            st.session_state.config = {"configurable": {"thread_id": st.session_state.session_id}}
-            st.session_state.graph_state = None
-            st.session_state.active_interrupt = None
-            st.session_state.uploaded_file_path = None
-            st.session_state.selected_node = None
-            st.rerun()
-            
-        st.stop()
+        # Agent 1: Profiling
+        prof_done = _is_node_complete(gstate, "dataset_profiling")
+        with st.expander(f"{'✓' if prof_done else '○'} 1. Dataset Profiling Agent", expanded=prof_done and not _is_node_complete(gstate, "problem_detection")):
+            render_profiling_card(gstate)
 
-    # -----------------------------------------------------------------------
-    # Interactive Checkpoint Cards (Design.md §4, §5)
-    # -----------------------------------------------------------------------
-    if is_interrupted:
-        active_interrupt_payload = gstate["__interrupt__"][-1].value
-        msg = active_interrupt_payload.get("message", "")
-        
-        st.markdown('<div class="checkpoint-card">', unsafe_allow_html=True)
-        st.markdown('<div class="checkpoint-title">⚠ Human Action Required</div>', unsafe_allow_html=True)
-        st.markdown(f'<p class="slate-text"><strong>Pipeline Intercepted:</strong> {msg}</p>', unsafe_allow_html=True)
+        # Agent 2: Detection
+        det_done = _is_node_complete(gstate, "problem_detection")
+        with st.expander(f"{'✓' if det_done else '○'} 2. Problem Detection Agent", expanded=det_done and not _is_node_complete(gstate, "data_preprocessing")):
+            render_problem_detection_card(gstate)
 
-        # Checkpoint 0 (4th): Feature Engineering Selection (always offered)
-        if "feature_suggestions" in active_interrupt_payload:
-            suggestions = active_interrupt_payload["feature_suggestions"] or []
-            available_cols = set()
-            profile = gstate.get("dataset_profile") or {}
-            available_cols.update(profile.get("numeric_cols") or [])
-            available_cols.update(profile.get("categorical_cols") or [])
+        # Agent 3: Feature Engineering
+        fe_done = _is_node_complete(gstate, "feature_engineering")
+        with st.expander(f"{'✓' if fe_done else '○'} 3. Feature Engineering Selection", expanded=fe_done and not _is_node_complete(gstate, "data_preprocessing")):
+            render_feature_engineering_card(gstate)
 
-            st.markdown("**Suggested feature-engineering opportunities** (check the ones you want created):")
-            checked = []
-            if not suggestions:
-                st.caption("No obvious feature-engineering opportunities were detected in this dataset.")
-            for sug in suggestions:
-                on = st.checkbox(
-                    sug.get("name", "feature"),
-                    value=False,
-                    key=f"fe_sug_{sug.get('name')}",
-                    help=sug.get("description", ""),
-                )
-                if on:
-                    checked.append(sug.get("name"))
-                else:
-                    st.caption(sug.get("description", ""))
+        # Agent 4: Preprocessing
+        prep_done = _is_node_complete(gstate, "data_preprocessing")
+        with st.expander(f"{'✓' if prep_done else '○'} 4. Data Preprocessing Agent", expanded=prep_done and not _is_node_complete(gstate, "experiment_orchestrator")):
+            render_preprocessing_card(gstate)
 
-            st.markdown("**Add a custom feature (optional)**")
-            st.caption("Formula may only use `+ - * /`, parentheses, and existing column names. "
-                       "Unsafe formulas are rejected and never executed.")
-            c_n1, c_n2 = st.columns(2)
-            with c_n1:
-                custom_name = st.text_input("New column name", placeholder="price_per_sqft", key="fe_custom_name")
-            with c_n2:
-                custom_formula = st.text_input("Formula", placeholder="price / sqft", key="fe_custom_formula")
+        # Agent 5: Experiment Orchestrator
+        exp_done = _is_node_complete(gstate, "experiment_orchestrator")
+        with st.expander(f"{'✓' if exp_done else '○'} 5. Experiment Orchestration (Model Training)", expanded=exp_done and not _is_node_complete(gstate, "model_evaluation")):
+            render_experiment_card(gstate)
 
-            custom_error = None
-            custom_features = []
-            if custom_name.strip() and custom_formula.strip():
-                try:
-                    validate_formula(custom_formula, available_cols)
-                    custom_features = [{"name": custom_name.strip(), "formula": custom_formula.strip()}]
-                except (FormulaValidationError, ValueError) as e:
-                    custom_error = str(e)
+        # Agent 6: Model Evaluation
+        eval_done = _is_node_complete(gstate, "model_evaluation")
+        with st.expander(f"{'✓' if eval_done else '○'} 6. Model Evaluation & Leaderboard", expanded=eval_done and not _is_node_complete(gstate, "report_generation")):
+            render_evaluation_card(gstate)
 
-            if custom_error:
-                st.error(f"Formula rejected — nothing will be executed: {custom_error}")
+        # Agent 7: Report Generation
+        rep_done = _is_node_complete(gstate, "report_generation")
+        with st.expander(f"{'✓' if rep_done else '○'} 7. Report Generation Agent", expanded=rep_done):
+            render_report_agent_card(gstate)
 
-            if st.button("Confirm Feature Selection", type="primary"):
-                resume_payload = {
-                    "selected_features": checked,
-                    "custom_features": custom_features,
-                }
-                with st.spinner("Applying selected features..."):
-                    res = st.session_state.graph.invoke(Command(resume=resume_payload), st.session_state.config)
-                    st.session_state.graph_state = res
-                    st.rerun()
 
-        # Checkpoint 1: Ambiguous Problem Detection Target/Task Type
-        elif "detected_target_column" in active_interrupt_payload:
-            detected_target = active_interrupt_payload["detected_target_column"]
-            detected_task = active_interrupt_payload["detected_task_type"]
-            confidence = active_interrupt_payload.get("confidence", 0.0)
-            
-            st.markdown(f"**Detected Target Column:** `{detected_target}`")
-            st.markdown(f"**Detected Task Type:** `{detected_task.upper()}` (Confidence: {confidence*100:.1f}%)")
-            
-            c_col1, c_col2 = st.columns(2)
-            with c_col1:
-                confirmed_target = st.text_input("Override Target Column:", value=detected_target)
-            with c_col2:
-                confirmed_task = st.selectbox(
-                    "Override Task Type:",
-                    options=["classification", "regression", "clustering"],
-                    index=["classification", "regression", "clustering"].index(detected_task)
-                )
-                
-            btn_col1, btn_col2 = st.columns([1, 4])
-            with btn_col1:
-                if st.button("Confirm Detection", type="primary"):
-                    resume_payload = {
-                        "target_column": detected_target,
-                        "task_type": detected_task
-                    }
-                    with st.spinner("Resuming execution..."):
-                        res = st.session_state.graph.invoke(Command(resume=resume_payload), st.session_state.config)
-                        st.session_state.graph_state = res
-                        st.rerun()
-            with btn_col2:
-                if st.button("Apply Override"):
-                    resume_payload = {
-                        "target_column": confirmed_target,
-                        "task_type": confirmed_task
-                    }
-                    with st.spinner("Applying overrides..."):
-                        res = st.session_state.graph.invoke(Command(resume=resume_payload), st.session_state.config)
-                        st.session_state.graph_state = res
-                        st.rerun()
-
-        # Checkpoint 2: Experiment Scope Configuration
-        elif "default_scope" in active_interrupt_payload:
-            default_scope = active_interrupt_payload["default_scope"]
-            models_list = active_interrupt_payload.get("available_models", [])
-            
-            st.markdown(f"**Available Model Configurations:** `{len(models_list)} models` in the zoo.")
-            
-            col_sc1, col_sc2, col_sc3 = st.columns(3)
-            with col_sc1:
-                max_exps = st.slider(
-                    "Max Experiments to Run:",
-                    min_value=1,
-                    max_value=len(models_list),
-                    value=default_scope.get("max_experiments", len(models_list))
-                )
-            with col_sc2:
-                max_w = st.slider(
-                    "Max Thread Workers (Concurrency):",
-                    min_value=1,
-                    max_value=8,
-                    value=default_scope.get("max_workers", 4)
-                )
-            with col_sc3:
-                time_cap = st.number_input(
-                    "Time Cap per Run (seconds, 0 for unlimited):",
-                    min_value=0,
-                    value=int(default_scope.get("time_cap_seconds", 0))
-                )
-                
-            btn_sc1, btn_sc2 = st.columns([1, 4])
-            with btn_sc1:
-                if st.button("Confirm Defaults", type="primary"):
-                    resume_payload = {
-                        "max_experiments": default_scope.get("max_experiments", len(models_list)),
-                        "max_workers": default_scope.get("max_workers", 4),
-                        "time_cap_seconds": default_scope.get("time_cap_seconds", 0)
-                    }
-                    with st.spinner("Executing experiments..."):
-                        res = st.session_state.graph.invoke(Command(resume=resume_payload), st.session_state.config)
-                        st.session_state.graph_state = res
-                        st.rerun()
-            with btn_sc2:
-                if st.button("Run Overridden Scope"):
-                    resume_payload = {
-                        "max_experiments": max_exps,
-                        "max_workers": max_w,
-                        "time_cap_seconds": time_cap
-                    }
-                    with st.spinner("Executing experiments..."):
-                        res = st.session_state.graph.invoke(Command(resume=resume_payload), st.session_state.config)
-                        st.session_state.graph_state = res
-                        st.rerun()
-
-        # Checkpoint 3: Best Model Leaderboard Pick/Override
-        elif "default_best_model_id" in active_interrupt_payload:
-            default_best = active_interrupt_payload["default_best_model_id"]
-            ranking_list = active_interrupt_payload.get("ranking", [])
-            task_t = active_interrupt_payload.get("task_type", "classification")
-            
-            st.markdown(f"**Leaderboard Pick:** `{default_best}`")
-            
-            # Show the ranked leaderboard inside the checkpoint card itself!
-            if ranking_list:
-                df_rank = pd.DataFrame(ranking_list)
-                st.dataframe(
-                    df_rank[["rank", "model_name", "primary_metric", "primary_value", "runtime_seconds"]]
-                )
-            
-            model_options = [r["model_id"] for r in ranking_list]
-            if default_best not in model_options and default_best != "none":
-                model_options.insert(0, default_best)
-            
-            override_model = st.selectbox(
-                "Select Override Model:",
-                options=model_options,
-                index=model_options.index(default_best) if default_best in model_options else 0
-            )
-            
-            btn_ev1, btn_ev2 = st.columns([1, 4])
-            with btn_ev1:
-                if st.button("Confirm Auto Selection", type="primary"):
-                    resume_payload = {"best_model_id": default_best}
-                    with st.spinner("Finalizing evaluation..."):
-                        res = st.session_state.graph.invoke(Command(resume=resume_payload), st.session_state.config)
-                        st.session_state.graph_state = res
-                        st.rerun()
-            with btn_ev2:
-                if st.button("Apply Model Override"):
-                    resume_payload = {"best_model_id": override_model}
-                    with st.spinner("Finalizing evaluation..."):
-                        res = st.session_state.graph.invoke(Command(resume=resume_payload), st.session_state.config)
-                        st.session_state.graph_state = res
-                        st.rerun()
-
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown("<hr>", unsafe_allow_html=True)
-
-    # -----------------------------------------------------------------------
-    # Selected-node detail panel (implementation details stay hidden until a
-    # node is clicked; the active running node is auto-selected).
-    # -----------------------------------------------------------------------
-    st.subheader("Step Output")
-
-    render_node_detail(gstate, selected_node, current_phase, is_interrupted)
-
-    # -----------------------------------------------------------------------
-    # Whole-workflow summary once every step is finished
-    # -----------------------------------------------------------------------
-    if _node_done(gstate, "report_generation"):
-        st.markdown("<hr>", unsafe_allow_html=True)
-        render_workflow_summary(gstate)
+# ---------------------------------------------------------------------------
+# Tab 3: Results & Final Report
+# ---------------------------------------------------------------------------
+with tab_results:
+    if st.session_state.graph_state is None:
+        st.info("No experiment has been run yet. Upload a dataset in **📁 1. Upload & Setup** to generate results.")
+    else:
+        render_final_results_tab(st.session_state.graph_state)

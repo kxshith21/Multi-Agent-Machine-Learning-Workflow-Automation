@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 import pandas as pd
 import numpy as np
 
@@ -194,6 +194,114 @@ def _apply_custom_features(
                 "details": f"Failed to evaluate custom formula for '{name}': {exc}",
                 "reasoning": "Custom feature could not be computed from the data.",
             })
+
+
+def _read_n_components_override() -> Optional[int]:
+    """
+    Read PREPROCESS_DIM_REDUCTION_COMPONENTS (optional int) from env.
+    Returns None when unset or invalid — the caller falls back to defaults.
+    """
+    raw = os.getenv("PREPROCESS_DIM_REDUCTION_COMPONENTS", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid PREPROCESS_DIM_REDUCTION_COMPONENTS=%r (expected an int)", raw
+        )
+        return None
+
+
+def _apply_dimensionality_reduction(
+    df: pd.DataFrame,
+    task_type: str,
+    preprocessing_log: list,
+    errors_to_report: list,
+) -> pd.DataFrame:
+    """
+    Preprocessing-level dimensionality reduction for UNSUPERVISED (clustering)
+    tasks only — supervised tasks keep their raw, interpretable features.
+
+    Runs AFTER the impute/scale/encode transform and BEFORE any target
+    re-attachment (clustering has no target, so the matrix is self-contained).
+
+    Method (env PREPROCESS_DIM_REDUCTION):
+      - "svd"  (default) → sklearn TruncatedSVD (works on dense or sparse)
+      - "pca"            → sklearn PCA (requires centered, dense input)
+      - "off" / "none"   → no reduction
+
+    Component count (env PREPROCESS_DIM_REDUCTION_COMPONENTS):
+      - optional int override; default min(50, n_features).
+      - Hard-capped to n_features-1 and n_samples-1 so the estimator always
+        receives a valid request (TruncatedSVD needs n_components < n_features).
+
+    Any failure is recoverable and non-blocking: the caller falls back to the
+    unreduced feature matrix.
+    """
+    if task_type != "clustering":
+        return df
+
+    n_samples, n_features = df.shape
+    # Nothing meaningful to reduce (0/1 features) — leave as-is.
+    if n_features < 2 or n_samples < 2:
+        return df
+
+    method = os.getenv("PREPROCESS_DIM_REDUCTION", "svd").strip().lower() or "svd"
+    if method in ("off", "none"):
+        return df
+
+    configured = _read_n_components_override()
+    target = configured if configured is not None else min(50, n_features)
+    n_components = max(1, min(int(target), n_features - 1, n_samples - 1))
+    if n_components >= n_features:
+        # Nothing would be lost — reduction is a no-op, keep original names.
+        return df
+
+    try:
+        if method == "pca":
+            from sklearn.decomposition import PCA
+            reducer = PCA(n_components=n_components, random_state=42)
+        else:
+            from sklearn.decomposition import TruncatedSVD
+            reducer = TruncatedSVD(n_components=n_components, algorithm="randomized", random_state=42)
+
+        reduced = reducer.fit_transform(df.to_numpy(dtype=float))
+        evr = getattr(reducer, "explained_variance_ratio_", None)
+        var_explained = float(np.sum(evr)) if evr is not None else 0.0
+
+        out = pd.DataFrame(
+            reduced,
+            columns=[f"pc_{i + 1}" for i in range(n_components)],
+            index=df.index,
+        )
+        preprocessing_log.append({
+            "column": "features",
+            "operation": "dimension_reduction",
+            "details": (
+                f"Reduced {n_features} features → {n_components} components "
+                f"({method}, {var_explained:.1%} variance explained)."
+            ),
+            "reasoning": (
+                "Clustering distance/silhouette metrics degrade in high-dimensional spaces; "
+                "a compact latent space concentrates signal and stabilizes cluster separation. "
+                "Applied for unsupervised clustering only; supervised tasks keep raw features."
+            ),
+        })
+        logger.info(
+            "Dimensionality reduction applied | %d → %d components | var=%.1f%%",
+            n_features, n_components, var_explained * 100.0,
+        )
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Dimensionality reduction failed (%s): %s", method, exc)
+        errors_to_report.append({
+            "phase": "data_preprocessing",
+            "error_type": "dimension_reduction_failed",
+            "message": f"Dimensionality reduction ({method}) failed and was skipped: {exc}",
+            "recoverable": True,
+        })
+        return df
 
 
 def preprocessing_agent(state: AgentMLState) -> dict[str, Any]:
@@ -449,6 +557,16 @@ def preprocessing_agent(state: AgentMLState) -> dict[str, Any]:
     else:
         # No features to preprocess
         df_processed = pd.DataFrame(index=df.index)
+
+    # 3b. Dimensionality reduction for unsupervised (clustering) tasks only
+    # (Option 1: preprocess-level reduction before the model zoo; supervised
+    # tasks keep their interpretable raw features).
+    df_processed = _apply_dimensionality_reduction(
+        df_processed,
+        state.get("task_type"),
+        preprocessing_log,
+        errors_to_report,
+    )
 
     # Re-attach target column (preserving values but resetting index to align with processed df)
     if target_col and target_col in df.columns:

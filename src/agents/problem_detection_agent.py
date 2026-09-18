@@ -256,8 +256,14 @@ def problem_detection_agent(state: AgentMLState) -> dict[str, Any]:
     else:
         nunique = df[target_col].nunique()
         dtype = df[target_col].dtype
-
-        if pd.api.types.is_categorical_dtype(df[target_col]) or pd.api.types.is_object_dtype(df[target_col]) or isinstance(dtype, pd.CategoricalDtype) or dtype == bool:
+        if (
+            pd.api.types.is_string_dtype(df[target_col])
+            or pd.api.types.is_object_dtype(df[target_col])
+            or isinstance(dtype, (pd.CategoricalDtype, getattr(pd, "StringDtype", type(None))))
+            or dtype == bool
+            or dtype == object
+            or dtype == str
+        ):
             task_type = "classification"
             confidence = 1.0
         elif pd.api.types.is_numeric_dtype(df[target_col]):
@@ -349,10 +355,35 @@ def problem_detection_agent(state: AgentMLState) -> dict[str, Any]:
         detection_reasoning = f"Human override confirmed. Target column: '{target_col}', Task type: '{task_type}'."
         logger.info(f"Updated task: {task_type}, target: {target_col}")
 
+    # 4b. Class-balance analysis for classification tasks (surfaced before training).
+    # Distribution is computed on the FINAL (possibly overridden) target column so
+    # the imbalance explained to the user matches what the models will actually see.
+    class_balance: Optional[dict] = None
+    if task_type == "classification" and target_col and target_col in df.columns:
+        try:
+            value_counts = df[target_col].dropna().value_counts(normalize=True)
+            if len(value_counts) >= 2:
+                class_balance = {str(k): round(float(v), 4) for k, v in value_counts.items()}
+                majority_share = max(class_balance.values())
+                minority_share = min(class_balance.values())
+                balance_clause = (
+                    f" Class distribution: {class_balance} "
+                    f"(majority {majority_share:.0%}, minority {minority_share:.0%})."
+                )
+                if minority_share < 0.10:
+                    balance_clause += (
+                        " This is a strongly imbalanced target, so F1/PR-AUC will be "
+                        "prioritized over accuracy for evaluation."
+                    )
+                detection_reasoning = (detection_reasoning or "").rstrip() + balance_clause
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[problem_detection] class-balance computation failed: %s", exc)
+
     return {
         "task_type": task_type,
         "target_column": target_col,
         "detection_confidence": confidence,
         "detection_reasoning": detection_reasoning,
+        "class_balance": class_balance,
         "errors": errors_to_report
     }

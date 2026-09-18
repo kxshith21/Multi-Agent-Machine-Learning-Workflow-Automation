@@ -27,6 +27,10 @@ from src.orchestrator.state import AgentMLState, ErrorEntry
 
 logger = logging.getLogger(__name__)
 
+#: Minority-class share below which a classification target is treated as
+#: imbalanced: F1/PR-AUC are explicitly prioritized over raw accuracy.
+IMBALANCE_MINORITY_THRESHOLD = 0.10
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,6 +49,7 @@ def _compose_reasoning(
     ranking_size: int,
     successful_size: int,
     failed_size: int,
+    class_balance: Optional[Dict[str, float]] = None,
 ) -> str:
     """
     Build a human-readable explanation of the best-model pick (Rules.md §5).
@@ -73,7 +78,7 @@ def _compose_reasoning(
             f"{_format_metric(tiebreaker_name, top['tiebreaker_value'])}"
         )
 
-    return (
+    base = (
         f"Selected '{top['model_name']}' as the best model for the {task_type} "
         f"task. It ranked first out of {ranking_size} successful experiment"
         f"{'s' if ranking_size != 1 else ''} on the primary metric "
@@ -82,13 +87,26 @@ def _compose_reasoning(
         f"failed and {'were' if failed_size != 1 else 'was'} excluded from ranking."
     )
 
+    # Imbalance-aware justification: when a minority class is below the threshold,
+    # explain why F1/PR-AUC were prioritized over raw accuracy for ranking.
+    if task_type == "classification" and class_balance and len(class_balance) >= 2:
+        minority_share = min(class_balance.values())
+        if minority_share < IMBALANCE_MINORITY_THRESHOLD:
+            base += (
+                f" Because the minority class represents only "
+                f"{minority_share * 100.0:.1f}% of samples (imbalanced target), "
+                f"F1 and PR-AUC were prioritized over accuracy for ranking — a "
+                f"majority-class-only model would otherwise look artificially good."
+            )
+    return base
+
 
 def _format_metric(name: str, value: float) -> str:
     """Format a metric for the reasoning string."""
     import math
     if math.isnan(value) or math.isinf(value):
         return "N/A"
-    if name in ("accuracy", "f1", "precision", "recall", "r2", "silhouette"):
+    if name in ("accuracy", "f1", "precision", "recall", "pr_auc", "r2", "silhouette"):
         return f"{value:.4f}"
     if name in ("rmse", "mae"):
         return f"{value:.3f}"
@@ -150,6 +168,7 @@ def evaluation_agent(state: AgentMLState) -> Dict[str, Any]:
             ranking_size=0,
             successful_size=len(successful),
             failed_size=len(failed),
+            class_balance=state.get("class_balance"),
         )
         # Still emit a checkpoint so the user can manually pick a model.
         # If they decline, best_model_id stays as the sentinel "none".
@@ -219,6 +238,7 @@ def evaluation_agent(state: AgentMLState) -> Dict[str, Any]:
         ranking_size=len(ranking),
         successful_size=len(successful),
         failed_size=len(failed),
+        class_balance=state.get("class_balance"),
     )
     if overridden:
         final_reasoning = (
