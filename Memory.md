@@ -161,6 +161,19 @@ Full test suite green (64 passed).
 - **Natural-language target VERIFIED working** — a chat instruction of *"predict who
   survived"* on a Titanic-like CSV resolves to `Survived` / `classification`
   end-to-end (Phase 9).
+- **Classification ranking now F1-first with imbalance handling.** Primary metric
+  changed from `accuracy` → `f1` (macro), tiebreaker `precision`; `pr_auc` reported
+  (binary). Zoo grew to 7 models with `SVC_rbf`; `class_weight="balanced"` on
+  LR/RF/SVC, XGBoost `scale_pos_weight` computed per-dataset. `class_balance` vs
+  `{0: 0.95, 1: 0.05}` surfaced pre-training; <10% minority triggers an
+  F1/PR-AUC-prioritized explanation. **80 tests pass** including a synthetic 95/5
+  e2e proving the majority baseline (ACC 0.94, F1 0.00) ranks LAST.
+- **DeepEval benchmarks extended from 2 agents → all 7 pipeline areas.** 8 test
+  functions / 9 benchmark rows (Problem Detection, Profiling, FE suggestions,
+  Preprocessing, Orchestrator integrity, Evaluation ranking, Report faithfulness,
+  hallucination, Q&A relevancy). Uses `metric.measure()` + rate-limit chain-aware
+  backoff (free Groq TPM = 8000/min) so the whole file passes in one invocation:
+  `pytest tests/test_agent_deepeval.py` → **8 passed**.
 
 ---
 

@@ -1,4 +1,4 @@
-# AgentML — Multi-Agent machine learning workflow automation
+# AgentML — Multi-Agent machine learning workflow
 
 AgentML is a **7-agent LangGraph pipeline** that takes a raw CSV and produces a
 complete, human-readable machine-learning experiment report — autonomously. It
@@ -163,18 +163,40 @@ and the always-offered feature-engineering checkpoint).
 
 AgentML includes an automated LLM evaluation suite powered by **DeepEval** to quantitatively test and continuously monitor agent decision accuracy, hallucination prevention, and response faithfulness.
 
+Every pipeline area is evaluated by an LLM judge (`openai/gpt-oss-120b` via Groq). The scope per area:
+
+| Pipeline Area | What Gets Judged | DeepEval Metric |
+| :--- | :--- | :--- |
+| **Problem Detection Agent** | Whether the instruction is resolved to an exact target column + correct task type (classification/regression/clustering) with no hallucinated columns. | `GEval` (Decision Accuracy) |
+| **Dataset Profiling Agent** | Whether the reported profile — rows, columns, dtypes, missing %, duplicate count, numeric/categorical split — matches the actual dataset. | `GEval` (Decision Accuracy) |
+| **Feature-Engineering Suggestions** | Whether datetime-decompose, correlated-pair ratio/product, and high-cardinality binning suggestions target appropriate columns and never hallucinate. | `GEval` (Decision Accuracy) |
+| **Data Preprocessing Agent** | Whether transformation decisions are correct (dedupe, median/mode impute, one-hot encode, standard scale) and the target column is never scaled or encoded. | `GEval` (Decision Accuracy) |
+| **Experiment Orchestrator** | Whether the experiment log is complete and correct: every zoo model run, `class_weight="balanced"` / XGBoost `scale_pos_weight` applied, failures isolated (not fatal). | `GEval` (Decision Accuracy) |
+| **Model Evaluation & Ranking** | Whether ranking is correct: classification ranked by F1 (macro) not accuracy, precision tiebreaker, imbalance explanation when a minority class is <10%. | `GEval` (Decision Accuracy) |
+| **Report Agent Narration** | Whether the narrative contains fabricated metrics/models and whether every claim strictly derives from the actual pipeline results. | `HallucinationMetric` + `FaithfulnessMetric` |
+| **Agent Q&A / Explanation Quality** | Whether the agent answers user ML queries directly and relevantly without extraneous rambling. | `AnswerRelevancyMetric` |
+
 ### Benchmark Evaluation Metrics
 
 | Agent & Workflow Area | DeepEval Metric | Target Criteria | Benchmark Result | Status |
 | :--- | :--- | :--- | :---: | :---: |
 | **Problem Detection Agent** | `GEval` (Decision Accuracy) | Evaluates if the agent accurately maps natural-language instructions to exact dataset columns without hallucinating nonexistent features. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+| **Dataset Profiling Agent** | `GEval` (Decision Accuracy) | Evaluates whether the reported profile (rows, columns, dtypes, missing %, duplicates, numeric/categorical split) matches the actual dataset. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+| **Feature-Engineering Suggestions** | `GEval` (Decision Accuracy) | Evaluates whether datetime-decompose / correlated-pair ratio / high-cardinality binning suggestions target appropriate columns and never hallucinate. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+| **Data Preprocessing Agent** | `GEval` (Decision Accuracy) | Evaluates transformation correctness (dedupe, median/mode impute, one-hot encode, scale) and that the target column is never scaled/encoded. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+| **Experiment Orchestrator** | `GEval` (Decision Accuracy) | Evaluates experiment-log integrity: all zoo models logged, imbalance parameters applied (`class_weight="balanced"`, XGBoost `scale_pos_weight`), failures isolated not fatal. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+| **Model Evaluation & Ranking** | `GEval` (Decision Accuracy) | Evaluates ranking correctness: classification ranked by F1 (macro) not accuracy, precision tiebreaker, imbalance explanation when minority <10%. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
 | **Report Agent Narration** | `HallucinationMetric` | Assesses whether the generated narrative contains fabricated accuracy numbers, ungrounded claims, or fake model names. | **1.00 / 1.00** (0% Hallucination) | **PASSED** |
 | **Report Agent Narration** | `FaithfulnessMetric` | Measures if every factual claim in the narrative strictly derives from the actual pipeline results and leaderboard metrics. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
-| **Agent Reasoning / Q&A** | `AnswerRelevancyMetric` | Verifies that the agent answers user architectural & ML queries directly without extraneous rambling. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
+| **Agent Q&A / Explanation Quality** | `AnswerRelevancyMetric` | Verifies that the agent answers user architectural & ML queries directly without extraneous rambling. | **1.00 / 1.00** (Threshold: $\ge$ 0.80) | **PASSED** |
 
-> Results above were verified on a live run (judge LLM: `openai/gpt-oss-120b`
-> via Groq). All four benchmarks passed at **1.00 / 1.00**, exceeding the
-> `>= 0.80` threshold.
+> **Verified live on 2026-09-18** (judge LLM: `openai/gpt-oss-120b` via Groq).
+> All **9 benchmark metrics across 8 test functions** — covering all seven
+> pipeline areas (Profiling, FE suggestions, Preprocessing, Problem Detection,
+> Orchestrator integrity, Evaluation ranking, Report narration, Q&A) — passed at
+> **1.00 / 1.00**, exceeding the `>= 0.80` threshold. The whole suite is green in
+> a single `pytest` invocation thanks to a rate-limit backoff helper (the free
+> Groq tier caps at 8K tokens/min).
 
 ### Running the DeepEval Benchmark Suite
 
@@ -190,7 +212,10 @@ python scripts/run_deepeval_eval.py
 
 The benchmark runner uses a Groq-hosted judge LLM (`openai/gpt-oss-120b` by
 default; override with `GROQ_EVAL_MODEL` in `.env`) and automatically retries
-transient Groq rate limits so a single run completes end-to-end.
+transient Groq rate limits (walking the `RetryError` cause chain — the free
+tier's 429s surface there — plus a quiet period between judge calls) so a single
+run completes end-to-end. Last verified output: **ALL EVALUATION BENCHMARKS
+PASSED PERFECTLY (100% SUCCESS)**.
 
 ## Performance
 
