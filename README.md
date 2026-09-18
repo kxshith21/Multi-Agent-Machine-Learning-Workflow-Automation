@@ -1,4 +1,4 @@
-# AgentML — Multi-Agent ML Experiment Orchestrator
+# AgentML — Multi-Agent machine learning workflow automation
 
 AgentML is a **7-agent LangGraph pipeline** that takes a raw CSV and produces a
 complete, human-readable machine-learning experiment report — autonomously. It
